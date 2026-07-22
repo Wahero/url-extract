@@ -1,17 +1,18 @@
 ---
 name: url-extract
-description: 通用内容精华抽取 v2.4——从B站视频、GitHub仓库、一般网页URL或腾讯微视链接中抽取精华内容，生成结构化Markdown文档，支持上传Markdown到IMA知识库（含RAW自动导入+去重）。触发词："精华"、"总结"、"提取"、"生成精华"、"B站精华"、"GitHub总结"、"网页精华"等。当用户提供任何链接并要求生成精华/总结/抽取内容时触发。
+description: 通用内容精华抽取 v2.5——从B站视频、GitHub仓库、一般网页URL或腾讯微视链接中抽取精华内容，生成结构化Markdown文档，支持上传Markdown到IMA知识库（含RAW自动导入+去重）。v2.5 修复 B站无字幕时 markdown 不完整 bug，新增 --ima-raw-md 外部 Markdown 文件上传。触发词："精华"、"总结"、"提取"、"生成精华"、"B站精华"、"GitHub总结"、"网页精华"等。当用户提供任何链接并要求生成精华/总结/抽取内容时触发。
 allowed-tools: Read, Write, Bash, WebSearch
 ---
 
-# URL Extract — 通用内容精华抽取 v2.4
+# URL Extract — 通用内容精华抽取 v2.5
 
-从多种来源抽取精华内容，生成干净的结构化 Markdown 文档。支持：B站视频、GitHub 仓库、一般网页 URL、腾讯微视/视频。**`--ima-raw` 上传完整 Markdown 文档到「RAW」个人知识库（非 URL 导入）。**
+从多种来源抽取精华内容，生成干净的结构化 Markdown 文档。支持：B站视频、GitHub 仓库、一般网页 URL、腾讯微视/视频。**`--ima-raw` 上传完整 Markdown 文档到「RAW」个人知识库（非 URL 导入）；`--ima-raw-md` 支持指定外部 Markdown 文件优先上传。**
 
+**v2.5 核心变更：修复 `_build_markdown_content()` 对 B站无字幕视频只输出空壳的 bug，重写为来源感知的完整结构化输出；新增 `--ima-raw-md` 参数，支持指定外部 Markdown 文件优先上传 agent 生成的高质量精华文档。**
 **v2.4 核心变更：IMA 凭证改为仅从环境变量读取，不持久化存储；--ima-raw 上传完整 Markdown 文档（四步流程：create_media → COS → add_knowledge）而非 URL 导入。**
 **v2.3 核心变更：新增 `--ima-raw` 自动导入 IMA「RAW」个人知识库（导入前搜索标题/URL 去重）。**
 **v2.2 核心变更：集成 IMA OpenAPI，抽取结果可自动导入用户知识库（--upload-ima + --ima-kb）。**
-**v2.1 核心变更：集成 defuddle CLI 替代 WebFetch，实现本���化网页内容提取，输出更干净、更省 token。**
+**v2.1 核心变更：集成 defuddle CLI 替代 WebFetch，实现本地化网页内容提取，输出更干净、更省 token。**
 
 ## 设计初衷
 
@@ -51,7 +52,7 @@ cd ~/.workbuddy/binaries/node/workspace && NODE_PATH=node_modules npx defuddle p
 
 | 来源 | 检测规则 | 抽取方式 | 内容补充策略 |
 |---|---|---|---|
-| **B站视频** | `bilibili.com` / `b23.tv` / BV号 | 脚本 `extract.py` 调用公开 API | 字幕缺失 → WebSearch 搜索社区文章 → defuddle 抓取文章正文 |
+| **B站视频** | `bilibili.com` / `b23.tv` / BV号 | 脚本 `extract.py` 调用公开 API | 脚本自动生成完整结构（视频概览表格/字幕/标签/评论）；字幕缺失时建议 agent 生成精华内容，通过 `--ima-raw-md` 上传 |
 | **GitHub 仓库** | `github.com` | 脚本 gh CLI → REST API → **defuddle** 三级降级 | Stars/描述/Topics 等元数据 + README 内容 |
 | **腾讯微视** | `weishi.qq.com` / `v.qq.com` 微信插件 | 脚本用微信 UA 模拟抓页面 HTML | **必须**用 WebSearch 搜索同话题报道 → defuddle 抓取报道正文 |
 | **一般网页** | 以上都不是 | **defuddle** 直接提取（一步到位） | 无需额外补充，defuddle 已返回完整正文+元数据 |
@@ -82,7 +83,7 @@ PYTHONPATH="<skill_dir>/scripts/deps" <managed_python> "<skill_dir>/scripts/extr
 | available | 处理方式 |
 |---|---|
 | `true` | 使用 `subtitle.full_text` 作为核心素材 |
-| `false` | 用 WebSearch 搜索视频标题 + 关键标签 → 找到社区文章 URL → 用 **defuddle** 抓取文章正文，整合还原视频讲解内容 |
+| `false` | 用 WebSearch 搜索视频标题 + 关键标签 → 找到社区文章 URL → 用 **defuddle** 抓取文章正文，整合还原视频讲解内容；或 agent 生成完整精华 Markdown 后通过 `--ima-raw-md` 上传 |
 
 **defuddle 抓取社区文章：**
 ```bash
@@ -225,22 +226,26 @@ python setup.py
 ### 使用方式
 
 ```bash
-# 上传 Markdown 文档到 RAW 知识库（v2.4，推荐）
+# 上传 Markdown 文档到 RAW 知识库（v2.5，推荐）
 python3 extract.py "https://b23.tv/xxx" --output result.json --ima-raw
+
+# 上传 agent 生成的外部 Markdown 文档到 RAW（v2.5 新增）
+python3 extract.py "https://b23.tv/xxx" --output result.json --ima-raw --ima-raw-md "./B站视频精华_xxx.md"
 
 # 导入 URL 到指定知识库（v2.2）
 python3 extract.py "https://example.com/article" --output result.json --upload-ima --ima-kb "我的知识库"
 
-# 仅���取（不导入 IMA），与旧版完全兼容
+# 仅抽取（不导入 IMA），与旧版完全兼容
 python3 extract.py "https://b23.tv/xxx" --output result.json
 ```
 
-`--ima-raw` 关键特性（v2.4）：
-- 上传完整 Markdown 精华文档（非 URL 导入）
+`--ima-raw` 关键特性（v2.5）：
+- 上传完整 Markdown 精华文档（非 URL 导入，v2.5 来源感知结构化输出）
 - 四步流程：check_repeated → create_media → COS 上传 → add_knowledge
 - 导入前检查重名和内容去重，已存在则跳过
 - 上传失败时自动降级为 URL 导入
 - 无需手动指定知识库名称，适合自动化管道
+- **新增 `--ima-raw-md <FILE>`**：指定外部 Markdown 文件优先上传（agent 生成的高质量精华文档）
 
 ### IMA 模块文件
 
@@ -264,7 +269,7 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
-| v2.3 | 2026-07-20 | 新增 `--ima-raw`：抽取后自动导入 IMA「RAW」个人知识库，导入前搜索去重；重构 `ima_client.py` 新增 `find_kb_by_name`/`check_duplicate` |
+| v2.5 | 2026-07-22 | 修复 `_build_markdown_content()` 对 B站无字幕视频只输出空壳的 bug，重写为来源感知完整结构化输出（视频概览表格/字幕全文/标签/评论精选/仓库概览等）；新增 `--ima-raw-md` 参数，支持指定外部 Markdown 文件优先上传 agent 生成的高质量精华文档 |
 | v2.4 | 2026-07-21 | IMA 凭证改为仅环境变量，不持久化存储；`--ima-raw` 上传完整 Markdown 文档（create_media → COS → add_knowledge）；修复 API 字段映射 bug |
 | v2.3 | 2026-07-20 | 新增 `--ima-raw`：抽取后自动导入 IMA「RAW」个人知识库，导入前搜索去重；重构 `ima_client.py` 新增 `find_kb_by_name`/`check_duplicate` |
 | v2.2 | 2026-07-20 | 集成 IMA OpenAPI：新增 `ima_client.py` + `setup.py`，支持 `--upload-ima` 一键导入知识库；凭证通过环境变量/配置文件分离管理 |

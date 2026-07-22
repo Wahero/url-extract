@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-通用内容抽取脚本 v2.4
+通用内容抽取脚本 v2.5
 支持来源：B站视频、GitHub仓库、一般网页URL、腾讯微视视频（降级方案）
 增强：抽取后自动导入 IMA 知识库，支持上传 Markdown 精华文档到「RAW」个人知识库
 
+v2.5 变更：修复 --ima-raw 上传 Markdown 不完整 bug（B站无字幕时 _build_markdown_content() 只输出标题+空壳+评论）；
+         重写 _build_markdown_content() 为来源感知的完整结构化输出（视频概览表格/字幕全文/标签/评论精选/仓库概览等）；
+         新增 --ima-raw-md 参数，支持指定外部 Markdown 文件优先上传 agent 生成的高质量精华文档。
 v2.4 变更：IMA 凭证改为仅从环境变量读取，不持久化存储；--ima-raw 上传完整 Markdown 文档而非 URL。
 v2.3 变更：新增 --ima-raw 自动导入 IMA「RAW」个人知识库，导入前去重检查。
 v2.2 变更：集成 IMA OpenAPI，支持抽取结果一键导入知识库（--upload-ima）。
@@ -592,68 +595,277 @@ def _upload_to_ima(data: dict, kb_name: str, source_url: str):
 
 
 def _build_markdown_content(data: dict) -> str:
-    """将抽取结果组装成 Markdown 文档。"""
+    """
+    将抽取结果组装成完整的结构化 Markdown 文档。
+
+    v2.5 修复：根据 source 类型生成完整内容。
+    - bilibili：视频概览表格 + 简介 + 字幕全文(如有) + 数据统计 + 高赞评论
+    - github：仓库概览表格 + README正文(content_markdown) + Topics
+    - webpage：元信息 + 完整正文(content_markdown)
+    - weishi：视频信息 + 补充说明
+    旧版 (v2.4) 仅输出 content_markdown，无字幕的 B 站视频会导致 Markdown 只剩空壳。
+    """
     lines = []
     source = data.get('source', '')
     title = data.get('title', '') or data.get('full_name', '')
+    source_url = data.get('url', '')
+    version = data.get('version', '2.5')
 
+    # ── 标题 & 元信息 ──
     lines.append(f"# {title}")
     lines.append("")
 
-    source_url = data.get('url', '')
-    lines.append(f"> 来源：{source} · 链接：{source_url}")
-    if data.get('author'):
-        lines.append(f"> 作者：{data['author']}")
-    if data.get('pubdate'):
-        lines.append(f"> 发布时间：{data['pubdate']}")
+    if source == 'bilibili':
+        owner = data.get('owner', {})
+        duration_sec = data.get('duration_sec', 0)
+        mm = duration_sec // 60
+        ss = duration_sec % 60
+        lines.append(f"> 来源：B站视频 · UP主：{owner.get('name', '')}")
+        lines.append(f"> 原始链接：{source_url}")
+        if data.get('pubdate'):
+            lines.append(f"> 发布时间：{data['pubdate']}（北京时间）")
+        lines.append(f"> 视频时长：{mm}分{ss}秒")
+    elif source == 'github':
+        lines.append(f"> 来源：GitHub · 链接：{source_url}")
+        if data.get('homepage'):
+            lines.append(f"> 主页：{data['homepage']}")
+    elif source == 'webpage':
+        lines.append(f"> 来源：{source} · 链接：{source_url}")
+        if data.get('author'):
+            lines.append(f"> 作者：{data['author']}")
+        if data.get('published'):
+            lines.append(f"> 发布日期：{data['published']}")
+        if data.get('domain'):
+            lines.append(f"> 域名：{data['domain']}")
+    elif source == 'weishi':
+        lines.append(f"> 来源：微视视频 · 链接：{source_url}")
+        if data.get('author'):
+            lines.append(f"> 作者：{data['author']}")
+    else:
+        lines.append(f"> 来源：{source} · 链接：{source_url}")
+        if data.get('author'):
+            lines.append(f"> 作者：{data['author']}")
+        if data.get('pubdate'):
+            lines.append(f"> 发布时间：{data['pubdate']}")
+
     lines.append("")
     lines.append("---")
     lines.append("")
 
-    content_md = data.get('content_markdown', '')
-    if content_md:
-        lines.append(content_md)
+    # ── B 站视频：概览表格 + 简介 + 字幕 + 评论 ──
+    if source == 'bilibili':
+        lines.append("## 一、视频概览")
+        lines.append("")
+        lines.append("| 项目 | 内容 |")
+        lines.append("|------|------|")
+        lines.append(f"| **标题** | {title} |")
+        owner = data.get('owner', {})
+        lines.append(f"| **UP主** | {owner.get('name', '')} |")
+        lines.append(f"| **BV号** | {data.get('bvid', '')} |")
+        tags = data.get('tags', [])
+        if tags:
+            lines.append(f"| **标签** | {', '.join(tags)} |")
+        stat = data.get('stat', {})
+        if stat:
+            lines.append(f"| **播放量** | {stat.get('view', 0)} |")
+            lines.append(f"| **点赞** | {stat.get('like', 0)} |")
+            lines.append(f"| **投币** | {stat.get('coin', 0)} |")
+            lines.append(f"| **收藏** | {stat.get('favorite', 0)} |")
+            lines.append(f"| **转发** | {stat.get('share', 0)} |")
+            lines.append(f"| **评论** | {stat.get('reply', 0)} |")
         lines.append("")
 
-    desc = data.get('desc', '') or data.get('description', '')
-    if desc:
-        lines.append("## 简介")
-        lines.append("")
-        lines.append(desc)
-        lines.append("")
-
-    stat = data.get('stat', {})
-    if stat:
-        lines.append("## 数据统计")
-        lines.append("")
-        lines.append("| 项目 | 数值 |")
-        lines.append("|---|---|")
-        for k, v in stat.items():
-            lines.append(f"| {k} | {v} |")
-        lines.append("")
-
-    replies = data.get('top_replies', [])
-    if replies:
-        lines.append("## 高赞评论")
-        lines.append("")
-        for r in replies:
-            like = r.get('like', 0)
-            content = r.get('content', '')
-            lines.append(f"> **[{like}赞]** {content}")
-            sub = r.get('top_sub_reply')
-            if sub:
-                sub_like = sub.get('like', 0)
-                sub_content = sub.get('content', '')
-                lines.append(f"> └─ **[{sub_like}赞]** {sub_content}")
+        desc = data.get('desc', '')
+        if desc:
+            lines.append("### 视频简介")
+            lines.append("")
+            lines.append(desc)
             lines.append("")
 
-    lines.append("## 参考资料")
+        subtitle = data.get('subtitle', {})
+        if subtitle.get('available') and subtitle.get('full_text'):
+            lines.append("## 二、视频字幕（完整转录）")
+            lines.append("")
+            if subtitle.get('lan'):
+                lines.append(f"> 语言：{subtitle['lan']}")
+                lines.append("")
+            lines.append(subtitle['full_text'])
+            lines.append("")
+        else:
+            lines.append("## 二、精华内容")
+            lines.append("")
+            note = subtitle.get('note', '') if subtitle else ''
+            lines.append(f"> ⚠️ {note}")
+            lines.append("")
+            lines.append("> 该视频 UP主未上传字幕，视频简介为空。精华内容需由 AI 基于视频标题、标签及评论区讨论推断还原，")
+            lines.append("> 或通过 `--ima-raw-md` 参数提供外部生成的完整精华 Markdown 文档上传。")
+            lines.append("")
+
+        replies = data.get('top_replies', [])
+        if replies:
+            lines.append("## 三、高赞评论")
+            lines.append("")
+            for i, r in enumerate(replies, 1):
+                like = r.get('like', 0)
+                rcount = r.get('rcount', 0)
+                uname = r.get('uname', '')
+                content = r.get('content', '')
+                lines.append(f"### {i}. {like} 赞 · {rcount} 回复 — {uname}")
+                lines.append("")
+                lines.append(f"> {content}")
+                lines.append("")
+                sub = r.get('top_sub_reply')
+                if sub:
+                    sub_like = sub.get('like', 0)
+                    sub_uname = sub.get('uname', '')
+                    sub_content = sub.get('content', '')
+                    lines.append(f"> └─ **[{sub_like} 赞] {sub_uname}**：{sub_content}")
+                    lines.append("")
+
+    # ── GitHub：仓库概览 + README ──
+    elif source == 'github':
+        lines.append("## 一、仓库概览")
+        lines.append("")
+        lines.append("| 项目 | 内容 |")
+        lines.append("|------|------|")
+        lines.append(f"| **仓库** | {data.get('full_name', title)} |")
+        if data.get('desc'):
+            lines.append(f"| **描述** | {data['desc']} |")
+        if data.get('stars'):
+            lines.append(f"| **Stars** | {data['stars']} |")
+        if data.get('forks'):
+            lines.append(f"| **Forks** | {data['forks']} |")
+        if data.get('language'):
+            lines.append(f"| **主要语言** | {data['language']} |")
+        if data.get('license'):
+            lines.append(f"| **许可证** | {data['license']} |")
+        topics = data.get('topics', [])
+        if topics:
+            lines.append(f"| **Topics** | {', '.join(topics)} |")
+        if data.get('created_at'):
+            lines.append(f"| **创建时间** | {data['created_at']} |")
+        if data.get('updated_at'):
+            lines.append(f"| **更新时间** | {data['updated_at']} |")
+        lines.append("")
+
+        content_md = data.get('content_markdown', '')
+        if content_md:
+            lines.append("## 二、README")
+            lines.append("")
+            lines.append(content_md)
+            lines.append("")
+        else:
+            note = data.get('note', '')
+            if note:
+                lines.append(f"> ⚠️ {note}")
+                lines.append("")
+
+    # ── 一般网页 ──
+    elif source == 'webpage':
+        lines.append("## 一、概览")
+        lines.append("")
+        lines.append("| 项目 | 内容 |")
+        lines.append("|------|------|")
+        lines.append(f"| **标题** | {title} |")
+        if data.get('author'):
+            lines.append(f"| **作者** | {data['author']} |")
+        if data.get('domain'):
+            lines.append(f"| **域名** | {data['domain']} |")
+        if data.get('published'):
+            lines.append(f"| **发布日期** | {data['published']} |")
+        if data.get('word_count'):
+            lines.append(f"| **字数** | {data['word_count']} |")
+        desc = data.get('desc', '') or data.get('description', '')
+        if desc:
+            lines.append(f"| **摘要** | {desc} |")
+        lines.append("")
+
+        content_md = data.get('content_markdown', '')
+        if content_md:
+            lines.append("## 二、正文内容")
+            lines.append("")
+            lines.append(content_md)
+            lines.append("")
+        else:
+            lines.append("## 二、正文内容")
+            lines.append("")
+            note = data.get('note', '')
+            if note:
+                lines.append(f"> ⚠️ {note}")
+                lines.append("")
+
+    # ── 腾讯微视 ──
+    elif source == 'weishi':
+        lines.append("## 一、视频信息")
+        lines.append("")
+        lines.append("| 项目 | 内容 |")
+        lines.append("|------|------|")
+        if title:
+            lines.append(f"| **标题** | {title} |")
+        if data.get('author'):
+            lines.append(f"| **作者** | {data['author']} |")
+        if data.get('share_count'):
+            lines.append(f"| **分享** | {data['share_count']} |")
+        lines.append("")
+
+        note = data.get('note', '')
+        if note:
+            lines.append(f"> ⚠️ {note}")
+            lines.append("")
+
+    # ── 通用 fallback ──
+    else:
+        desc = data.get('desc', '') or data.get('description', '')
+        if desc:
+            lines.append("## 简介")
+            lines.append("")
+            lines.append(desc)
+            lines.append("")
+
+        content_md = data.get('content_markdown', '')
+        if content_md:
+            lines.append("## 内容")
+            lines.append("")
+            lines.append(content_md)
+            lines.append("")
+
+        stat = data.get('stat', {})
+        if stat:
+            lines.append("## 数据统计")
+            lines.append("")
+            lines.append("| 项目 | 数值 |")
+            lines.append("|---|---|")
+            for k, v in stat.items():
+                lines.append(f"| {k} | {v} |")
+            lines.append("")
+
+        replies = data.get('top_replies', [])
+        if replies:
+            lines.append("## 评论")
+            lines.append("")
+            for r in replies:
+                like = r.get('like', 0)
+                content = r.get('content', '')
+                lines.append(f"> **[{like}赞]** {content}")
+                sub = r.get('top_sub_reply')
+                if sub:
+                    sub_like = sub.get('like', 0)
+                    sub_content = sub.get('content', '')
+                    lines.append(f"> └─ **[{sub_like}赞]** {sub_content}")
+                lines.append("")
+
+    # ── 参考资料 ──
+    last_section = '四' if source == 'bilibili' else '三' if source in ('github', 'webpage', 'weishi') else ''
+    if last_section:
+        lines.append(f"## {last_section}、参考资料")
+    else:
+        lines.append("## 参考资料")
     lines.append("")
     lines.append(f"- 原始链接：{source_url}")
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append(f"*本文档由 url-extract v{data.get('version', '2.4')} 自动生成，仅作信息整理与学习参考之用。*")
+    lines.append(f"*本文档由 url-extract v{version} 自动生成，仅作信息整理与学习参考之用。*")
 
     return "\n".join(lines)
 
@@ -667,8 +879,12 @@ def _sanitize_filename(title: str) -> str:
     return safe or 'extract'
 
 
-def _upload_to_ima_raw(data: dict, source_url: str):
-    """将抽取结果作为 Markdown 文件上传到 IMA「RAW」个人知识库。"""
+def _upload_to_ima_raw(data: dict, source_url: str, external_md_path: str = ""):
+    """将抽取结果作为 Markdown 文件上传到 IMA「RAW」个人知识库。
+
+    v2.5 新增：若 external_md_path 指定了外部 Markdown 文件，优先上传该文件内容
+    （用于 agent 生成的高质量精华文档），否则使用脚本自动生成的 Markdown。
+    """
     ima = _load_ima_client()
     kb_name = "RAW"
     title = data.get("title", "") or data.get("full_name", "")
@@ -685,7 +901,14 @@ def _upload_to_ima_raw(data: dict, source_url: str):
     # 构建 Markdown 文件名和内容
     safe_title = _sanitize_filename(title)
     file_name = f"{safe_title}.md"
-    md_content = _build_markdown_content(data)
+
+    # v2.5: 优先使用外部 Markdown 文件（agent 生成的高质量精华）
+    if external_md_path and os.path.isfile(external_md_path):
+        with open(external_md_path, "r", encoding="utf-8") as f:
+            md_content = f.read()
+        print(f"[IMA] 使用外部 Markdown 文件: {external_md_path} ({len(md_content)} chars)", file=sys.stderr)
+    else:
+        md_content = _build_markdown_content(data)
 
     # 上传 Markdown 文件（check_repeated_names 在 upload_markdown_to_kb 内部执行）
     print(f"[IMA] 正在上传 Markdown 到知识库「{kb_name}」: {file_name}", file=sys.stderr)
@@ -717,17 +940,18 @@ def _upload_to_ima_raw(data: dict, source_url: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='通用内容精华抽取 v2.4 (defuddle + IMA 集成)')
+    parser = argparse.ArgumentParser(description='通用内容精华抽取 v2.5 (defuddle + IMA 集成)')
     parser.add_argument('link', help='链接（B站/GitHub/网页/微视）')
     parser.add_argument('--output', '-o', default='extract_result.json', help='输出JSON路径')
     parser.add_argument('--upload-ima', action='store_true', help='抽取后导入 URL 到 IMA 知识库')
     parser.add_argument('--ima-kb', type=str, default='', help='目标 IMA 知识库名称（需配合 --upload-ima）')
     parser.add_argument('--ima-raw', action='store_true', help='上传 Markdown 文档到 IMA「RAW」个人知识库')
+    parser.add_argument('--ima-raw-md', type=str, default='', help='指定外部 Markdown 文件路径，优先上传该文件（配合 --ima-raw 使用，用于 agent 生成的高质量精华文档）')
     args = parser.parse_args()
 
     data = extract(args.link)
     data['extracted_at'] = datetime.now(tz=CST).strftime('%Y-%m-%d %H:%M:%S')
-    data['version'] = '2.4'
+    data['version'] = '2.5'
 
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -742,7 +966,7 @@ def main():
     # IMA 导入 (--ima-raw 优先)
     if args.ima_raw:
         source_url = data.get('url', args.link)
-        _upload_to_ima_raw(data, source_url)
+        _upload_to_ima_raw(data, source_url, args.ima_raw_md)
     elif args.upload_ima:
         if not args.ima_kb:
             print("[IMA] 错误: 请用 --ima-kb 指定目标知识库名称。", file=sys.stderr)

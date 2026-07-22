@@ -1,6 +1,6 @@
 # URL Extract — 通用内容精华抽取
 
-> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.4：IMA 凭证改为环境变量传递，不持久化存储；--ima-raw 上传完整 Markdown 文档到知识库。**
+> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.5：修复 B站无字幕 markdown 不完整 bug，重写为来源感知结构化输出，新增 --ima-raw-md 外部 Markdown 文件上传。**
 
 ## 为什么需要它？
 
@@ -43,7 +43,10 @@ python3 extract.py "https://example.com/article" --output result.json --ima-raw
 # 3. 或导入到指定知识库（URL 导入）
 python3 extract.py "https://example.com/article" --output result.json --upload-ima --ima-kb "我的知识库"
 
-# 4. 或仅抽取（不导入 IMA）
+# 4. 使用外部 Markdown 文件上传到 RAW（v2.5 新增）
+python3 extract.py "https://b23.tv/xxx" --output result.json --ima-raw --ima-raw-md "./精华文档.md"
+
+# 5. 或仅抽取（不导入 IMA）
 python3 extract.py "https://b23.tv/xxx" --output result.json
 ```
 
@@ -51,7 +54,8 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 
 | 参数 | 导入方式 | 内容 |
 |---|---|---|
-| `--ima-raw` | 上传 Markdown 文件（四步流程：create_media → COS → add_knowledge） | 完整精华 Markdown 文档 |
+| `--ima-raw` | 上传 Markdown 文件（四步流程：create_media → COS → add_knowledge） | 完整精华 Markdown 文档（v2.5 来源感知结构化输出） |
+| `--ima-raw-md <FILE>` | 配合 `--ima-raw` 使用，指定外部 Markdown 文件 | 优先上传 agent 生成的高质量精华文档 |
 | `--upload-ima` | URL 导入（import_urls） | 原始网址链接 |
 
 ## 输出格式
@@ -119,7 +123,7 @@ python3 extract.py "https://b23.tv/xxx" -o result.json
 ```
 url-extract/
 ├── SKILL.md          # AI Skill 定义（通用版，平台无关）
-├── extract.py        # 核心抽取脚本（v2.4：+Markdown上传IMA）
+├── extract.py        # 核心抽取脚本（v2.5：来源感知结构化输出 + --ima-raw-md）
 ├── ima_client.py     # IMA OpenAPI Python 客户端 v1.2（仅环境变量认证）
 ├── setup.py          # 凭证引导配置脚本（不持久化）
 ├── README.md         # 项目说明
