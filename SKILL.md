@@ -1,6 +1,6 @@
 ---
 name: url-extract
-description: 通用内容精华抽取 v2.5——从B站视频、GitHub仓库、一般网页URL或腾讯微视链接中抽取精华内容，生成结构化Markdown文档，支持上传Markdown到IMA知识库（含RAW自动导入+去重）。v2.5 修复 B站无字幕时 markdown 不完整 bug，新增 --ima-raw-md 外部 Markdown 文件上传。触发词："精华"、"总结"、"提取"、"生成精华"、"B站精华"、"GitHub总结"、"网页精华"等。当用户提供任何链接并要求生成精华/总结/抽取内容时触发。
+description: 通用内容精华抽取 v2.5.1——从B站视频、GitHub仓库、一般网页URL或腾讯微视链接中抽取精华内容，生成结构化Markdown文档，支持上传Markdown到IMA知识库（含RAW自动导入+去重）。v2.5.1 修复 B站无字幕时 --ima-raw 仍上传空壳的 bug，增加安全守卫。触发词："精华"、"总结"、"提取"、"生成精华"、"B站精华"、"GitHub总结"、"网页精华"等。当用户提供任何链接并要求生成精华/总结/抽取内容时触发。
 allowed-tools: Read, Write, Bash, WebSearch
 ---
 
@@ -296,6 +296,7 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v2.5.1 | 2026-08-04 | 修复 --ima-raw 在 B站无字幕时仍上传空壳 Markdown 的 bug，增加安全守卫：无字幕且无 --ima-raw-md 时阻止上传并提示正确流程 |
 | v2.5 | 2026-07-22 | 修复 `_build_markdown_content()` 对 B站无字幕视频只输出空壳的 bug，重写为来源感知完整结构化输出（视频概览表格/字幕全文/标签/评论精选/仓库概览等）；新增 `--ima-raw-md` 参数，支持指定外部 Markdown 文件优先上传 agent 生成的高质量精华文档 |
 | v2.4 | 2026-07-21 | IMA 凭证改为仅环境变量，不持久化存储；`--ima-raw` 上传完整 Markdown 文档（create_media → COS → add_knowledge）；修复 API 字段映射 bug |
 | v2.3 | 2026-07-20 | 新增 `--ima-raw`：抽取后自动导入 IMA「RAW」个人知识库，导入前搜索去重；重构 `ima_client.py` 新增 `find_kb_by_name`/`check_duplicate` |

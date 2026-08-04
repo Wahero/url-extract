@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-通用内容抽取脚本 v2.5
+通用内容抽取脚本 v2.5.1
 支持来源：B站视频、GitHub仓库、一般网页URL、腾讯微视视频（降级方案）
 增强：抽取后自动导入 IMA 知识库，支持上传 Markdown 精华文档到「RAW」个人知识库
 
+v2.5.1 变更：修复 --ima-raw 在 B站无字幕时仍上传空壳 Markdown 的 bug，增加安全守卫：无字幕且无 --ima-raw-md 时阻止上传并提示正确流程。
 v2.5 变更：修复 --ima-raw 上传 Markdown 不完整 bug（B站无字幕时 _build_markdown_content() 只输出标题+空壳+评论）；
          重写 _build_markdown_content() 为来源感知的完整结构化输出（视频概览表格/字幕全文/标签/评论精选/仓库概览等）；
          新增 --ima-raw-md 参数，支持指定外部 Markdown 文件优先上传 agent 生成的高质量精华文档。
@@ -908,6 +909,13 @@ def _upload_to_ima_raw(data: dict, source_url: str, external_md_path: str = ""):
             md_content = f.read()
         print(f"[IMA] 使用外部 Markdown 文件: {external_md_path} ({len(md_content)} chars)", file=sys.stderr)
     else:
+        # v2.5.1: B站无字幕且无外部 MD 文件时，阻止上传空壳内容
+        if data.get('source') == 'bilibili':
+            subtitle = data.get('subtitle', {})
+            if not subtitle.get('available'):
+                print("[IMA] ⚠️ B站视频无字幕，Markdown 内容不完整，跳过上传。", file=sys.stderr)
+                print("[IMA]    请先用 WebSearch + defuddle 补充内容，生成完整 Markdown 后通过 --ima-raw-md 上传。", file=sys.stderr)
+                return False
         md_content = _build_markdown_content(data)
 
     # 上传 Markdown 文件（check_repeated_names 在 upload_markdown_to_kb 内部执行）
@@ -940,7 +948,7 @@ def _upload_to_ima_raw(data: dict, source_url: str, external_md_path: str = ""):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='通用内容精华抽取 v2.5 (defuddle + IMA 集成)')
+    parser = argparse.ArgumentParser(description='通用内容精华抽取 v2.5.1 (defuddle + IMA 集成)')
     parser.add_argument('link', help='链接（B站/GitHub/网页/微视）')
     parser.add_argument('--output', '-o', default='extract_result.json', help='输出JSON路径')
     parser.add_argument('--upload-ima', action='store_true', help='抽取后导入 URL 到 IMA 知识库')
@@ -951,7 +959,7 @@ def main():
 
     data = extract(args.link)
     data['extracted_at'] = datetime.now(tz=CST).strftime('%Y-%m-%d %H:%M:%S')
-    data['version'] = '2.5'
+    data['version'] = '2.5.1'
 
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
