@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-IMA OpenAPI Python 客户端 v1.2
+IMA OpenAPI Python 客户端 v1.3
 仅从环境变量读取凭证，不持久化存储。
 
 认证方式：环境变量 IMA_OPENAPI_CLIENTID / IMA_OPENAPI_APIKEY
 
+v1.3 变更：COS 上传从单一手写 v1 签名改为「SDK 优先 + Legacy 兜底」双实现。
+        默认 prefer="auto"：装了 cos-python-sdk-v5 走 SDK，否则用 legacy v1。
+        也可显式 prefer="sdk" / "legacy"。
 v1.2 变更：移除文件持久化，仅从环境变量读取凭证；新增 Markdown 文件上传（四步流程）。
 v1.1 新增：find_kb_by_name / search_knowledge_in_kb（知识库内容检索去重）
 """
@@ -213,9 +216,56 @@ def create_media(kb_id: str, file_name: str, file_size: int,
     )
 
 
-def _cos_upload(credential: dict, file_data: bytes, content_type: str,
-                cos_key: str, file_size: int) -> bool:
-    """使用 COS 临时凭证上传文件到腾讯云对象存储。"""
+def _cos_upload_sdk(credential: dict, file_data: bytes, content_type: str,
+                    cos_key: str, file_size: int) -> bool:
+    """使用 cos-python-sdk-v5 上传（推荐）。需要 pip install cos-python-sdk-v5。
+
+    优点：官方维护，签名算法、token 刷新、错误重试都交给 SDK。
+    缺点：多一个依赖。
+    """
+    try:
+        from qcloud_cos import CosConfig, CosS3Client
+    except ImportError as e:
+        raise RuntimeError(
+            "需要 cos-python-sdk-v5: pip install cos-python-sdk-v5"
+        ) from e
+
+    secret_id = credential.get("secret_id", "")
+    secret_key = credential.get("secret_key", "")
+    token = credential.get("token", "")
+    bucket = credential.get("bucket_name") or credential.get("bucket", "")
+    region = credential.get("region", "")
+
+    config = CosConfig(
+        Region=region,
+        SecretId=secret_id,
+        SecretKey=secret_key,
+        Token=token,
+        Scheme="https",
+    )
+    client = CosS3Client(config)
+
+    response = client.put_object(
+        Bucket=bucket,
+        Key=cos_key,
+        Body=file_data,
+        ContentType=content_type,
+        ContentLength=file_size,
+    )
+    # cos-python-sdk-v5 返回 dict-like，status_code 在 dict 化的响应里
+    status = getattr(response, "status_code", None) or response.get("status_code")
+    return status in (200, 204)
+
+
+def _cos_upload_legacy_v1(credential: dict, file_data: bytes, content_type: str,
+                          cos_key: str, file_size: int) -> bool:
+    """手写 COS 签名 v1 算法（无 SDK 依赖的 fallback）。
+
+    保留原因：
+    - 不强加 cos-python-sdk-v5 依赖
+    - 一些受限环境（内网 / 离线）装不上 PyPI 包
+    - 老用户升级路径不破坏
+    """
     import time
     import hmac
     import hashlib
@@ -278,6 +328,30 @@ def _cos_upload(credential: dict, file_data: bytes, content_type: str,
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"COS 上传失败 (HTTP {e.code}): {error_body}")
+
+
+def _cos_upload(credential: dict, file_data: bytes, content_type: str,
+                cos_key: str, file_size: int,
+                prefer: str = "auto") -> bool:
+    """
+    COS 上传分发。
+
+    prefer:
+        - "auto"   优先 SDK，没装就降级到 legacy v1（推荐）
+        - "sdk"    强制用 SDK，没装就报错
+        - "legacy" 强制用手写 v1
+    """
+    if prefer == "legacy":
+        return _cos_upload_legacy_v1(credential, file_data, content_type, cos_key, file_size)
+    if prefer == "sdk":
+        return _cos_upload_sdk(credential, file_data, content_type, cos_key, file_size)
+
+    # auto: 探测 qcloud_cos
+    try:
+        import qcloud_cos  # noqa: F401
+    except ImportError:
+        return _cos_upload_legacy_v1(credential, file_data, content_type, cos_key, file_size)
+    return _cos_upload_sdk(credential, file_data, content_type, cos_key, file_size)
 
 
 def add_knowledge_file(kb_id: str, media_id: str, cos_key: str,
