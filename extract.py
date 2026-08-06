@@ -38,7 +38,13 @@ from urllib.parse import urlparse
 try:
     import requests
 except ImportError:
-    print("ERROR: 缺少 requests 库，请运行: pip install requests", file=sys.stderr)
+    print("ERROR: 缺少 requests 库，请运行: pip install -r requirements.txt", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    import jinja2
+except ImportError:
+    print("ERROR: 缺少 jinja2 库，请运行: pip install jinja2", file=sys.stderr)
     sys.exit(1)
 
 CST = timezone(timedelta(hours=8))
@@ -48,66 +54,137 @@ HEADERS = {
 }
 
 # ============================================================
-# defuddle CLI 集成
+# defuddle CLI 集成（跨平台自动探测）
 # ============================================================
+#
+# 探测顺序：
+#   1. 环境变量 DEFUDDLE_BIN（指向 defuddle/npx 可执行文件）
+#   2. PATH 中的 defuddle
+#   3. PATH 中的 npx / npx.cmd（用 npx defuddle ...）
+#   4. 都没找到且 DEFUDDLE_AUTO_INSTALL != 0：尝试 `npm i -g defuddle`
+#
+# Windows 下 .cmd 文件需 shell=True；通过扩展名自动识别。
 
-DEFUDDLE_WORKSPACE = os.path.join(
-    os.environ.get('USERPROFILE', os.environ.get('HOME', '/tmp')),
-    '.workbuddy', 'binaries', 'node', 'workspace'
-)
+import shutil
+from pathlib import Path
 
-# Windows 下 npx 是 .cmd 文件，需要 shell=True 或直接用完整路径
-NODE_BIN_DIR = os.path.join(
-    os.environ.get('USERPROFILE', os.environ.get('HOME', '/tmp')),
-    '.workbuddy', 'binaries', 'node', 'versions', '22.22.2'
-)
 
-def _find_npx_path() -> str:
-    """查找 npx 可执行文件的完整路径（兼容 Windows/macOS/Linux）。"""
-    # Windows: 优先找 npx.cmd
-    npx_cmd = os.path.join(NODE_BIN_DIR, 'npx.cmd')
-    if os.path.isfile(npx_cmd):
-        return npx_cmd
-    # Unix: 找 npx
-    npx_bin = os.path.join(NODE_BIN_DIR, 'npx')
-    if os.path.isfile(npx_bin):
-        return npx_bin
-    # 兜底：系统 PATH 中的 npx
-    return 'npx'
+def _resolve_defuddle() -> tuple[str, bool, str | None]:
+    """
+    解析 defuddle 入口，返回 (command, needs_shell, workspace_dir)。
 
-NPX_PATH = _find_npx_path()
-# Windows 下 .cmd 文件需要 shell=True
-NPX_NEEDS_SHELL = os.path.isfile(os.path.join(NODE_BIN_DIR, 'npx.cmd'))
+    command:
+        - 'defuddle ...' 或 'npx defuddle ...' 或绝对路径
+    needs_shell:
+        - True 表示该命令是 .cmd / .bat（Windows），需要 shell=True
+    workspace_dir:
+        - 可选的 cwd；找不到时返回 None（让 subprocess.run 用当前目录）
+    """
+    # 1. 显式覆盖
+    override = os.environ.get('DEFUDDLE_BIN')
+    if override and os.path.isfile(override):
+        return (override, override.lower().endswith(('.cmd', '.bat')), None)
+
+    # 2. PATH 中的 defuddle
+    dfd = shutil.which('defuddle')
+    if dfd:
+        return (dfd, dfd.lower().endswith(('.cmd', '.bat')), None)
+
+    # 3. PATH 中的 npx
+    npx = shutil.which('npx') or shutil.which('npx.cmd')
+    if npx:
+        return (npx, npx.lower().endswith(('.cmd', '.bat')), None)
+
+    # 4. 自动安装（除非显式禁用）
+    if os.environ.get('DEFUDDLE_AUTO_INSTALL', '1') != '0':
+        npm = shutil.which('npm') or shutil.which('npm.cmd')
+        if npm:
+            print('[defuddle] 未找到，尝试 npm i -g defuddle ...', file=sys.stderr)
+            try:
+                subprocess.run(
+                    [npm, 'install', '-g', 'defuddle'],
+                    timeout=120, check=False,
+                )
+            except Exception as e:
+                print(f'[defuddle] 自动安装失败: {e}', file=sys.stderr)
+            dfd = shutil.which('defuddle')
+            if dfd:
+                return (dfd, dfd.lower().endswith(('.cmd', '.bat')), None)
+
+    return ('', False, None)
+
+
+def _find_local_node_modules() -> str | None:
+    """查找本地 node_modules（含 defuddle 的目录）。用于 NODE_PATH 兜底。"""
+    candidates = [
+        os.environ.get('DEFUDDLE_NODE_PATH'),
+        os.path.join(os.getcwd(), 'node_modules'),
+        os.path.expanduser('~/.npm-global/lib/node_modules'),
+        # 兼容旧版 workbuddy 布局
+        os.path.join(
+            os.environ.get('USERPROFILE', os.environ.get('HOME', '/tmp')),
+            '.workbuddy', 'binaries', 'node', 'workspace', 'node_modules',
+        ),
+    ]
+    for c in candidates:
+        if c and os.path.isdir(os.path.join(c, 'defuddle')):
+            return c
+    return None
+
+
+_DEFUDDLE_CMD, _DEFUDDLE_SHELL, _DEFUDDLE_CWD = _resolve_defuddle()
+
 
 def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
     """
     调用 defuddle CLI 提取网页内容。
-    
+
     Args:
         url: 目标网页 URL
         format: 输出格式，'json' 返回完整元数据+内容，'markdown' 返回纯 Markdown
-    
+
     Returns:
         dict (format='json') 或 str (format='markdown')，失败返回 None
     """
-    cmd_args = [NPX_PATH, 'defuddle', 'parse', url]
+    if not _DEFUDDLE_CMD:
+        print(
+            'WARN: defuddle 不可用（未安装且 auto-install 关闭）。'
+            '安装方式: npm i -g defuddle',
+            file=sys.stderr,
+        )
+        return None
+
+    # 决定调用方式：npx defuddle / 直接 defuddle / 绝对路径
+    cmd_basename = os.path.basename(_DEFUDDLE_CMD).lower()
+    if cmd_basename == 'npx' or cmd_basename == 'npx.cmd':
+        cmd_args = [_DEFUDDLE_CMD, 'defuddle', 'parse', url]
+    else:
+        cmd_args = [_DEFUDDLE_CMD, 'parse', url]
+
     if format == 'json':
         cmd_args.append('--json')
     elif format == 'markdown':
         cmd_args.append('--markdown')
 
-    env = {**os.environ, 'NODE_PATH': os.path.join(DEFUDDLE_WORKSPACE, 'node_modules')}
+    env = os.environ.copy()
+    local_nm = _find_local_node_modules()
+    if local_nm:
+        env['NODE_PATH'] = local_nm
 
     try:
         result = subprocess.run(
             cmd_args,
             capture_output=True, text=True, timeout=30,
-            cwd=DEFUDDLE_WORKSPACE,
+            cwd=_DEFUDDLE_CWD,
             env=env,
-            shell=NPX_NEEDS_SHELL,
+            shell=_DEFUDDLE_SHELL,
         )
         if result.returncode != 0:
-            print(f"WARN: defuddle CLI 失败 (exit={result.returncode}): {result.stderr[:200]}", file=sys.stderr)
+            print(
+                f"WARN: defuddle CLI 失败 (exit={result.returncode}): "
+                f"{result.stderr[:200]}",
+                file=sys.stderr,
+            )
             return None
 
         output = result.stdout.strip()
@@ -116,8 +193,7 @@ def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
 
         if format == 'json':
             return json.loads(output)
-        else:
-            return output
+        return output
 
     except subprocess.TimeoutExpired:
         print(f"WARN: defuddle CLI 超时 (URL: {url})", file=sys.stderr)
