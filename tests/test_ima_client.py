@@ -101,3 +101,27 @@ def test_credentials_fallback_legacy_env_names():
         cid, key = ima_client.load_credentials()
         assert cid == "legacy_id"
         assert key == "legacy_key"
+
+
+def test_legacy_cos_upload_emits_deprecation_warning():
+    """_cos_upload_legacy_v1 调用时触发 DeprecationWarning。"""
+    with mock.patch("urllib.request.urlopen") as m_urlopen:
+        # mock urllib.urlopen 返回 200
+        m_resp = mock.MagicMock()
+        m_resp.status = 200
+        m_resp.__enter__ = mock.MagicMock(return_value=m_resp)
+        m_resp.__exit__ = mock.MagicMock(return_value=False)
+        m_urlopen.return_value = m_resp
+
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ok = ima_client._cos_upload_legacy_v1(
+                CRED, FILE_DATA, CT, COS_KEY, SIZE,
+            )
+            assert ok is True
+            assert any(
+                issubclass(warning.category, DeprecationWarning)
+                and "cos-python-sdk-v5" in str(warning.message)
+                for warning in w
+            ), "应该触发 DeprecationWarning 并提示迁移到 SDK"

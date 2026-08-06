@@ -14,6 +14,7 @@ v1.1 新增：find_kb_by_name / search_knowledge_in_kb（知识库内容检索�
 
 import os
 import json
+import warnings
 import urllib.request
 import urllib.error
 
@@ -261,11 +262,21 @@ def _cos_upload_legacy_v1(credential: dict, file_data: bytes, content_type: str,
                           cos_key: str, file_size: int) -> bool:
     """手写 COS 签名 v1 算法（无 SDK 依赖的 fallback）。
 
+    .. deprecated::
+        请安装 ``cos-python-sdk-v5`` 并改用 ``_cos_upload_sdk``（或
+        ``_cos_upload(..., prefer='auto')`` 自动选择）。此函数将在 v2.7 移除。
+
     保留原因：
     - 不强加 cos-python-sdk-v5 依赖
     - 一些受限环境（内网 / 离线）装不上 PyPI 包
     - 老用户升级路径不破坏
     """
+    warnings.warn(
+        "_cos_upload_legacy_v1 已废弃，请安装 cos-python-sdk-v5 走 _cos_upload_sdk。"
+        "此函数将在 v2.7 移除。",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     import time
     import hmac
     import hashlib
