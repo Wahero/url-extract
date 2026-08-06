@@ -1,0 +1,15 @@
+{
+  "source": "webpage",
+  "title": "测试网页标题",
+  "desc": "测试网页摘要",
+  "author": "测试作者",
+  "domain": "example.com",
+  "language": "zh-CN",
+  "published": "2025-03-01T00:00:00Z",
+  "site": "Example",
+  "word_count": 800,
+  "content_markdown": "## 第一段\n\n测试网页正文段落一。\n\n## 第二段\n\n测试网页正文段落二。",
+  "url": "https://example.com/article",
+  "subtitle": {"available": false, "note": "网页内容由 defuddle 提取"},
+  "note": "数据来源：defuddle CLI"
+}

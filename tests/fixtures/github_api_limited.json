@@ -1,0 +1,12 @@
+{
+  "source": "github",
+  "owner": "test",
+  "repo": "limited",
+  "full_name": "test/limited",
+  "title": "test/limited",
+  "desc": "限流降级的测试仓库",
+  "content_markdown": "# 限流降级 README\n\n这是从 defuddle 提取的 README 内容。",
+  "domain": "github.com",
+  "url": "https://github.com/test/limited",
+  "note": "数据来源：defuddle（GitHub API限流降级）"
+}

@@ -1,0 +1,45 @@
+# {{ title }}
+
+> 来源：网页 · 链接：{{ url }}
+{% if author %}> 作者：{{ author }}
+{% endif %}{% if published %}> 发布日期：{{ published }}
+{% endif %}{% if domain %}> 域名：{{ domain }}
+{% endif %}
+
+---
+
+## 一、概览
+
+| 项目 | 内容 |
+|------|------|
+| **标题** | {{ title }} |
+{% if author %}| **作者** | {{ author }} |
+{% endif %}{% if domain %}| **域名** | {{ domain }} |
+{% endif %}{% if published %}| **发布日期** | {{ published }} |
+{% endif %}{% if word_count %}| **字数** | {{ word_count }} |
+{% endif %}{% if desc %}| **摘要** | {{ desc }} |
+{% endif %}
+{% if content_markdown %}
+## 二、正文内容
+
+{{ content_markdown }}
+
+{% else %}
+## 二、正文内容
+
+{% if note %}
+> ⚠️ {{ note }}
+
+{% endif %}{% endif %}
+## 三、参考资料
+
+- 原始链接：{{ url }}
+
+---
+
+> ⚠️ **重要声明**
+>
+> 本文档由 url-extract v{{ version }}（学术测试版）生成。当视频无字幕时，文档中的部分内容系从社区中相同或相似标题的公开资料处获取并整合而成，**并非直接由视频本身的音频或画面提取**。部分要点可能来自社区作者的二次解读，而非视频创作者的原话。视频中独有的演示画面、语气强调、即兴发挥等内容无法被覆盖。文档的结构化呈现可能掩盖内容可信度的局限性。
+>
+> **如需用于正式参考、引用或决策，请务必对照原始视频核实。**
+> 本工具请勿用于生产环境。

@@ -1,0 +1,44 @@
+# {{ full_name or title }}
+
+> 来源：GitHub · 链接：{{ url }}
+{% if homepage %}> 主页：{{ homepage }}
+{% endif %}
+
+---
+
+## 一、仓库概览
+
+| 项目 | 内容 |
+|------|------|
+| **仓库** | {{ full_name or title }} |
+{% if desc %}| **描述** | {{ desc }} |
+{% endif %}{% if stars is not none %}| **Stars** | {{ stars }} |
+{% endif %}{% if forks is not none %}| **Forks** | {{ forks }} |
+{% endif %}{% if language %}| **主要语言** | {{ language }} |
+{% endif %}{% if license %}| **许可证** | {{ license }} |
+{% endif %}{% if topics %}| **Topics** | {{ topics | join('、') }} |
+{% endif %}{% if created_at %}| **创建时间** | {{ created_at }} |
+{% endif %}{% if updated_at %}| **更新时间** | {{ updated_at }} |
+{% endif %}
+{% if content_markdown %}
+## 二、README
+
+{{ content_markdown }}
+
+{% else %}
+{% if note %}
+> ⚠️ {{ note }}
+
+{% endif %}{% endif %}
+## 三、参考资料
+
+- 原始链接：{{ url }}
+
+---
+
+> ⚠️ **重要声明**
+>
+> 本文档由 url-extract v{{ version }}（学术测试版）生成。当视频无字幕时，文档中的部分内容系从社区中相同或相似标题的公开资料处获取并整合而成，**并非直接由视频本身的音频或画面提取**。部分要点可能来自社区作者的二次解读，而非视频创作者的原话。视频中独有的演示画面、语气强调、即兴发挥等内容无法被覆盖。文档的结构化呈现可能掩盖内容可信度的局限性。
+>
+> **如需用于正式参考、引用或决策，请务必对照原始视频核实。**
+> 本工具请勿用于生产环境。

@@ -38,7 +38,13 @@ from urllib.parse import urlparse
 try:
     import requests
 except ImportError:
-    print("ERROR: 缺少 requests 库，请运行: pip install requests", file=sys.stderr)
+    print("ERROR: 缺少 requests 库，请运行: pip install -r requirements.txt", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    import jinja2
+except ImportError:
+    print("ERROR: 缺少 jinja2 库，请运行: pip install jinja2", file=sys.stderr)
     sys.exit(1)
 
 CST = timezone(timedelta(hours=8))
@@ -47,67 +53,148 @@ HEADERS = {
     'Referer': 'https://www.bilibili.com/',
 }
 
+# 模板与来源前缀
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATES_DIR = os.path.join(_SCRIPT_DIR, 'templates')
+_SOURCE_PREFIX = {
+    'bilibili': 'B站视频精华_',
+    'github': 'GitHub精华_',
+    'weishi': '视频精华_',
+    'webpage': '网页精华_',
+}
+
 # ============================================================
-# defuddle CLI 集成
+# defuddle CLI 集成（跨平台自动探测）
 # ============================================================
+#
+# 探测顺序：
+#   1. 环境变量 DEFUDDLE_BIN（指向 defuddle/npx 可执行文件）
+#   2. PATH 中的 defuddle
+#   3. PATH 中的 npx / npx.cmd（用 npx defuddle ...）
+#   4. 都没找到且 DEFUDDLE_AUTO_INSTALL != 0：尝试 `npm i -g defuddle`
+#
+# Windows 下 .cmd 文件需 shell=True；通过扩展名自动识别。
 
-DEFUDDLE_WORKSPACE = os.path.join(
-    os.environ.get('USERPROFILE', os.environ.get('HOME', '/tmp')),
-    '.workbuddy', 'binaries', 'node', 'workspace'
-)
+import shutil
+from pathlib import Path
 
-# Windows 下 npx 是 .cmd 文件，需要 shell=True 或直接用完整路径
-NODE_BIN_DIR = os.path.join(
-    os.environ.get('USERPROFILE', os.environ.get('HOME', '/tmp')),
-    '.workbuddy', 'binaries', 'node', 'versions', '22.22.2'
-)
 
-def _find_npx_path() -> str:
-    """查找 npx 可执行文件的完整路径（兼容 Windows/macOS/Linux）。"""
-    # Windows: 优先找 npx.cmd
-    npx_cmd = os.path.join(NODE_BIN_DIR, 'npx.cmd')
-    if os.path.isfile(npx_cmd):
-        return npx_cmd
-    # Unix: 找 npx
-    npx_bin = os.path.join(NODE_BIN_DIR, 'npx')
-    if os.path.isfile(npx_bin):
-        return npx_bin
-    # 兜底：系统 PATH 中的 npx
-    return 'npx'
+def _resolve_defuddle() -> tuple[str, bool, str | None]:
+    """
+    解析 defuddle 入口，返回 (command, needs_shell, workspace_dir)。
 
-NPX_PATH = _find_npx_path()
-# Windows 下 .cmd 文件需要 shell=True
-NPX_NEEDS_SHELL = os.path.isfile(os.path.join(NODE_BIN_DIR, 'npx.cmd'))
+    command:
+        - 'defuddle ...' 或 'npx defuddle ...' 或绝对路径
+    needs_shell:
+        - True 表示该命令是 .cmd / .bat（Windows），需要 shell=True
+    workspace_dir:
+        - 可选的 cwd；找不到时返回 None（让 subprocess.run 用当前目录）
+    """
+    # 1. 显式覆盖
+    override = os.environ.get('DEFUDDLE_BIN')
+    if override and os.path.isfile(override):
+        return (override, override.lower().endswith(('.cmd', '.bat')), None)
+
+    # 2. PATH 中的 defuddle
+    dfd = shutil.which('defuddle')
+    if dfd:
+        return (dfd, dfd.lower().endswith(('.cmd', '.bat')), None)
+
+    # 3. PATH 中的 npx
+    npx = shutil.which('npx') or shutil.which('npx.cmd')
+    if npx:
+        return (npx, npx.lower().endswith(('.cmd', '.bat')), None)
+
+    # 4. 自动安装（除非显式禁用）
+    if os.environ.get('DEFUDDLE_AUTO_INSTALL', '1') != '0':
+        npm = shutil.which('npm') or shutil.which('npm.cmd')
+        if npm:
+            print('[defuddle] 未找到，尝试 npm i -g defuddle ...', file=sys.stderr)
+            try:
+                subprocess.run(
+                    [npm, 'install', '-g', 'defuddle'],
+                    timeout=120, check=False,
+                )
+            except Exception as e:
+                print(f'[defuddle] 自动安装失败: {e}', file=sys.stderr)
+            dfd = shutil.which('defuddle')
+            if dfd:
+                return (dfd, dfd.lower().endswith(('.cmd', '.bat')), None)
+
+    return ('', False, None)
+
+
+def _find_local_node_modules() -> str | None:
+    """查找本地 node_modules（含 defuddle 的目录）。用于 NODE_PATH 兜底。"""
+    candidates = [
+        os.environ.get('DEFUDDLE_NODE_PATH'),
+        os.path.join(os.getcwd(), 'node_modules'),
+        os.path.expanduser('~/.npm-global/lib/node_modules'),
+        # 兼容旧版 workbuddy 布局
+        os.path.join(
+            os.environ.get('USERPROFILE', os.environ.get('HOME', '/tmp')),
+            '.workbuddy', 'binaries', 'node', 'workspace', 'node_modules',
+        ),
+    ]
+    for c in candidates:
+        if c and os.path.isdir(os.path.join(c, 'defuddle')):
+            return c
+    return None
+
+
+_DEFUDDLE_CMD, _DEFUDDLE_SHELL, _DEFUDDLE_CWD = _resolve_defuddle()
+
 
 def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
     """
     调用 defuddle CLI 提取网页内容。
-    
+
     Args:
         url: 目标网页 URL
         format: 输出格式，'json' 返回完整元数据+内容，'markdown' 返回纯 Markdown
-    
+
     Returns:
         dict (format='json') 或 str (format='markdown')，失败返回 None
     """
-    cmd_args = [NPX_PATH, 'defuddle', 'parse', url]
+    if not _DEFUDDLE_CMD:
+        print(
+            'WARN: defuddle 不可用（未安装且 auto-install 关闭）。'
+            '安装方式: npm i -g defuddle',
+            file=sys.stderr,
+        )
+        return None
+
+    # 决定调用方式：npx defuddle / 直接 defuddle / 绝对路径
+    cmd_basename = os.path.basename(_DEFUDDLE_CMD).lower()
+    if cmd_basename == 'npx' or cmd_basename == 'npx.cmd':
+        cmd_args = [_DEFUDDLE_CMD, 'defuddle', 'parse', url]
+    else:
+        cmd_args = [_DEFUDDLE_CMD, 'parse', url]
+
     if format == 'json':
         cmd_args.append('--json')
     elif format == 'markdown':
         cmd_args.append('--markdown')
 
-    env = {**os.environ, 'NODE_PATH': os.path.join(DEFUDDLE_WORKSPACE, 'node_modules')}
+    env = os.environ.copy()
+    local_nm = _find_local_node_modules()
+    if local_nm:
+        env['NODE_PATH'] = local_nm
 
     try:
         result = subprocess.run(
             cmd_args,
             capture_output=True, text=True, timeout=30,
-            cwd=DEFUDDLE_WORKSPACE,
+            cwd=_DEFUDDLE_CWD,
             env=env,
-            shell=NPX_NEEDS_SHELL,
+            shell=_DEFUDDLE_SHELL,
         )
         if result.returncode != 0:
-            print(f"WARN: defuddle CLI 失败 (exit={result.returncode}): {result.stderr[:200]}", file=sys.stderr)
+            print(
+                f"WARN: defuddle CLI 失败 (exit={result.returncode}): "
+                f"{result.stderr[:200]}",
+                file=sys.stderr,
+            )
             return None
 
         output = result.stdout.strip()
@@ -116,8 +203,7 @@ def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
 
         if format == 'json':
             return json.loads(output)
-        else:
-            return output
+        return output
 
     except subprocess.TimeoutExpired:
         print(f"WARN: defuddle CLI 超时 (URL: {url})", file=sys.stderr)
@@ -595,280 +681,85 @@ def _upload_to_ima(data: dict, kb_name: str, source_url: str):
         return False
 
 
+def _build_context_for_source(data: dict) -> dict:
+    """
+    把抽取结果按来源归整为模板可直接用的 context。
+    模板在 templates/<source>.md.j2，渲染时仅关心模板里出现的字段。
+    """
+    source = data.get('source', '')
+    title = data.get('title', '') or data.get('full_name', '') or '未命名'
+    duration_sec = int(data.get('duration_sec', 0) or 0)
+    return {
+        'source': source,
+        'title': title,
+        'url': data.get('url', ''),
+        'version': data.get('version', '2.5.2'),
+        'owner': data.get('owner', {}) or {},
+        'bvid': data.get('bvid', ''),
+        'pubdate': data.get('pubdate', ''),
+        'duration_min': duration_sec // 60,
+        'duration_sec': duration_sec % 60,
+        'tags': data.get('tags', []) or [],
+        'stat': data.get('stat', {}) or {},
+        'desc': data.get('desc', '') or data.get('description', ''),
+        'subtitle': data.get('subtitle', {}) or {'available': False},
+        'top_replies': data.get('top_replies', []) or [],
+        'full_name': data.get('full_name', ''),
+        'homepage': data.get('homepage', ''),
+        'stars': data.get('stars'),
+        'forks': data.get('forks'),
+        'language': data.get('language', ''),
+        'license': data.get('license', ''),
+        'topics': data.get('topics', []) or [],
+        'created_at': data.get('created_at', ''),
+        'updated_at': data.get('updated_at', ''),
+        'author': data.get('author', ''),
+        'domain': data.get('domain', ''),
+        'published': data.get('published', ''),
+        'word_count': data.get('word_count', 0),
+        'content_markdown': data.get('content_markdown', ''),
+        'note': data.get('note', ''),
+        'share_count': data.get('share_count', 0),
+    }
+
+
+_JINJA_ENV = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(TEMPLATES_DIR),
+    trim_blocks=True,
+    lstrip_blocks=True,
+    keep_trailing_newline=True,
+)
+
+
+def _render_template(source: str, context: dict) -> str:
+    """按 source 选择模板渲染；找不到则走通用 fallback（拼装 desc+content）。"""
+    template_name = f"{source}.md.j2"
+    try:
+        tpl = _JINJA_ENV.get_template(template_name)
+        return tpl.render(**context)
+    except jinja2.TemplateNotFound:
+        # 通用 fallback：标题 + desc + 正文 + 参考资料
+        lines = [f"# {context['title']}", "",
+                 f"> 来源：{source} · 链接：{context['url']}", ""]
+        if context.get('desc'):
+            lines += ["## 简介", "", context['desc'], ""]
+        if context.get('content_markdown'):
+            lines += ["## 内容", "", context['content_markdown'], ""]
+        lines += ["## 参考资料", "", f"- 原始链接：{context['url']}", "",
+                  "---", "",
+                  f"*本文档由 url-extract v{context['version']} 自动生成。*"]
+        return "\n".join(lines)
+
+
 def _build_markdown_content(data: dict) -> str:
     """
-    将抽取结果组装成完整的结构化 Markdown 文档。
+    将抽取结果组装成完整的结构化 Markdown 文档（v2.5.2：模板拆分为 templates/*.md.j2）。
 
-    v2.5 修复：根据 source 类型生成完整内容。
-    - bilibili：视频概览表格 + 简介 + 字幕全文(如有) + 数据统计 + 高赞评论
-    - github：仓库概览表格 + README正文(content_markdown) + Topics
-    - webpage：元信息 + 完整正文(content_markdown)
-    - weishi：视频信息 + 补充说明
-    旧版 (v2.4) 仅输出 content_markdown，无字幕的 B 站视频会导致 Markdown 只剩空壳。
+    - bilibili / github / webpage / weishi → 各自模板
+    - 未知 source → 通用 fallback
     """
-    lines = []
-    source = data.get('source', '')
-    title = data.get('title', '') or data.get('full_name', '')
-    source_url = data.get('url', '')
-    version = data.get('version', '2.5')
-
-    # ── 标题 & 元信息 ──
-    lines.append(f"# {title}")
-    lines.append("")
-
-    if source == 'bilibili':
-        owner = data.get('owner', {})
-        duration_sec = data.get('duration_sec', 0)
-        mm = duration_sec // 60
-        ss = duration_sec % 60
-        lines.append(f"> 来源：B站视频 · UP主：{owner.get('name', '')}")
-        lines.append(f"> 原始链接：{source_url}")
-        if data.get('pubdate'):
-            lines.append(f"> 发布时间：{data['pubdate']}（北京时间）")
-        lines.append(f"> 视频时长：{mm}分{ss}秒")
-    elif source == 'github':
-        lines.append(f"> 来源：GitHub · 链接：{source_url}")
-        if data.get('homepage'):
-            lines.append(f"> 主页：{data['homepage']}")
-    elif source == 'webpage':
-        lines.append(f"> 来源：{source} · 链接：{source_url}")
-        if data.get('author'):
-            lines.append(f"> 作者：{data['author']}")
-        if data.get('published'):
-            lines.append(f"> 发布日期：{data['published']}")
-        if data.get('domain'):
-            lines.append(f"> 域名：{data['domain']}")
-    elif source == 'weishi':
-        lines.append(f"> 来源：微视视频 · 链接：{source_url}")
-        if data.get('author'):
-            lines.append(f"> 作者：{data['author']}")
-    else:
-        lines.append(f"> 来源：{source} · 链接：{source_url}")
-        if data.get('author'):
-            lines.append(f"> 作者：{data['author']}")
-        if data.get('pubdate'):
-            lines.append(f"> 发布时间：{data['pubdate']}")
-
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # ── B 站视频：概览表格 + 简介 + 字幕 + 评论 ──
-    if source == 'bilibili':
-        lines.append("## 一、视频概览")
-        lines.append("")
-        lines.append("| 项目 | 内容 |")
-        lines.append("|------|------|")
-        lines.append(f"| **标题** | {title} |")
-        owner = data.get('owner', {})
-        lines.append(f"| **UP主** | {owner.get('name', '')} |")
-        lines.append(f"| **BV号** | {data.get('bvid', '')} |")
-        tags = data.get('tags', [])
-        if tags:
-            lines.append(f"| **标签** | {', '.join(tags)} |")
-        stat = data.get('stat', {})
-        if stat:
-            lines.append(f"| **播放量** | {stat.get('view', 0)} |")
-            lines.append(f"| **点赞** | {stat.get('like', 0)} |")
-            lines.append(f"| **投币** | {stat.get('coin', 0)} |")
-            lines.append(f"| **收藏** | {stat.get('favorite', 0)} |")
-            lines.append(f"| **转发** | {stat.get('share', 0)} |")
-            lines.append(f"| **评论** | {stat.get('reply', 0)} |")
-        lines.append("")
-
-        desc = data.get('desc', '')
-        if desc:
-            lines.append("### 视频简介")
-            lines.append("")
-            lines.append(desc)
-            lines.append("")
-
-        subtitle = data.get('subtitle', {})
-        if subtitle.get('available') and subtitle.get('full_text'):
-            lines.append("## 二、视频字幕（完整转录）")
-            lines.append("")
-            if subtitle.get('lan'):
-                lines.append(f"> 语言：{subtitle['lan']}")
-                lines.append("")
-            lines.append(subtitle['full_text'])
-            lines.append("")
-        else:
-            lines.append("## 二、精华内容")
-            lines.append("")
-            note = subtitle.get('note', '') if subtitle else ''
-            lines.append(f"> ⚠️ {note}")
-            lines.append("")
-            lines.append("> 该视频 UP主未上传字幕，视频简介为空。精华内容需由 AI 基于视频标题、标签及评论区讨论推断还原，")
-            lines.append("> 或通过 `--ima-raw-md` 参数提供外部生成的完整精华 Markdown 文档上传。")
-            lines.append("")
-
-        replies = data.get('top_replies', [])
-        if replies:
-            lines.append("## 三、高赞评论")
-            lines.append("")
-            for i, r in enumerate(replies, 1):
-                like = r.get('like', 0)
-                rcount = r.get('rcount', 0)
-                uname = r.get('uname', '')
-                content = r.get('content', '')
-                lines.append(f"### {i}. {like} 赞 · {rcount} 回复 — {uname}")
-                lines.append("")
-                lines.append(f"> {content}")
-                lines.append("")
-                sub = r.get('top_sub_reply')
-                if sub:
-                    sub_like = sub.get('like', 0)
-                    sub_uname = sub.get('uname', '')
-                    sub_content = sub.get('content', '')
-                    lines.append(f"> └─ **[{sub_like} 赞] {sub_uname}**：{sub_content}")
-                    lines.append("")
-
-    # ── GitHub：仓库概览 + README ──
-    elif source == 'github':
-        lines.append("## 一、仓库概览")
-        lines.append("")
-        lines.append("| 项目 | 内容 |")
-        lines.append("|------|------|")
-        lines.append(f"| **仓库** | {data.get('full_name', title)} |")
-        if data.get('desc'):
-            lines.append(f"| **描述** | {data['desc']} |")
-        if data.get('stars'):
-            lines.append(f"| **Stars** | {data['stars']} |")
-        if data.get('forks'):
-            lines.append(f"| **Forks** | {data['forks']} |")
-        if data.get('language'):
-            lines.append(f"| **主要语言** | {data['language']} |")
-        if data.get('license'):
-            lines.append(f"| **许可证** | {data['license']} |")
-        topics = data.get('topics', [])
-        if topics:
-            lines.append(f"| **Topics** | {', '.join(topics)} |")
-        if data.get('created_at'):
-            lines.append(f"| **创建时间** | {data['created_at']} |")
-        if data.get('updated_at'):
-            lines.append(f"| **更新时间** | {data['updated_at']} |")
-        lines.append("")
-
-        content_md = data.get('content_markdown', '')
-        if content_md:
-            lines.append("## 二、README")
-            lines.append("")
-            lines.append(content_md)
-            lines.append("")
-        else:
-            note = data.get('note', '')
-            if note:
-                lines.append(f"> ⚠️ {note}")
-                lines.append("")
-
-    # ── 一般网页 ──
-    elif source == 'webpage':
-        lines.append("## 一、概览")
-        lines.append("")
-        lines.append("| 项目 | 内容 |")
-        lines.append("|------|------|")
-        lines.append(f"| **标题** | {title} |")
-        if data.get('author'):
-            lines.append(f"| **作者** | {data['author']} |")
-        if data.get('domain'):
-            lines.append(f"| **域名** | {data['domain']} |")
-        if data.get('published'):
-            lines.append(f"| **发布日期** | {data['published']} |")
-        if data.get('word_count'):
-            lines.append(f"| **字数** | {data['word_count']} |")
-        desc = data.get('desc', '') or data.get('description', '')
-        if desc:
-            lines.append(f"| **摘要** | {desc} |")
-        lines.append("")
-
-        content_md = data.get('content_markdown', '')
-        if content_md:
-            lines.append("## 二、正文内容")
-            lines.append("")
-            lines.append(content_md)
-            lines.append("")
-        else:
-            lines.append("## 二、正文内容")
-            lines.append("")
-            note = data.get('note', '')
-            if note:
-                lines.append(f"> ⚠️ {note}")
-                lines.append("")
-
-    # ── 腾讯微视 ──
-    elif source == 'weishi':
-        lines.append("## 一、视频信息")
-        lines.append("")
-        lines.append("| 项目 | 内容 |")
-        lines.append("|------|------|")
-        if title:
-            lines.append(f"| **标题** | {title} |")
-        if data.get('author'):
-            lines.append(f"| **作者** | {data['author']} |")
-        if data.get('share_count'):
-            lines.append(f"| **分享** | {data['share_count']} |")
-        lines.append("")
-
-        note = data.get('note', '')
-        if note:
-            lines.append(f"> ⚠️ {note}")
-            lines.append("")
-
-    # ── 通用 fallback ──
-    else:
-        desc = data.get('desc', '') or data.get('description', '')
-        if desc:
-            lines.append("## 简介")
-            lines.append("")
-            lines.append(desc)
-            lines.append("")
-
-        content_md = data.get('content_markdown', '')
-        if content_md:
-            lines.append("## 内容")
-            lines.append("")
-            lines.append(content_md)
-            lines.append("")
-
-        stat = data.get('stat', {})
-        if stat:
-            lines.append("## 数据统计")
-            lines.append("")
-            lines.append("| 项目 | 数值 |")
-            lines.append("|---|---|")
-            for k, v in stat.items():
-                lines.append(f"| {k} | {v} |")
-            lines.append("")
-
-        replies = data.get('top_replies', [])
-        if replies:
-            lines.append("## 评论")
-            lines.append("")
-            for r in replies:
-                like = r.get('like', 0)
-                content = r.get('content', '')
-                lines.append(f"> **[{like}赞]** {content}")
-                sub = r.get('top_sub_reply')
-                if sub:
-                    sub_like = sub.get('like', 0)
-                    sub_content = sub.get('content', '')
-                    lines.append(f"> └─ **[{sub_like}赞]** {sub_content}")
-                lines.append("")
-
-    # ── 参考资料 ──
-    last_section = '四' if source == 'bilibili' else '三' if source in ('github', 'webpage', 'weishi') else ''
-    if last_section:
-        lines.append(f"## {last_section}、参考资料")
-    else:
-        lines.append("## 参考资料")
-    lines.append("")
-    lines.append(f"- 原始链接：{source_url}")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-    lines.append(f"*本文档由 url-extract v{version} 自动生成，仅作信息整理与学习参考之用。*")
-
-    return "\n".join(lines)
+    ctx = _build_context_for_source(data)
+    return _render_template(ctx['source'], ctx)
 
 
 def _sanitize_filename(title: str) -> str:
