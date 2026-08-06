@@ -1,0 +1,46 @@
+{
+  "source": "bilibili",
+  "bvid": "BV1xx411c7mD",
+  "aid": 12345678,
+  "cid": 99887766,
+  "title": "测试视频标题",
+  "desc": "这是一段视频简介",
+  "owner": {
+    "name": "测试UP主",
+    "mid": 10086
+  },
+  "pubdate": "2025-01-15 10:30:00",
+  "duration_sec": 365,
+  "tags": ["测试", "示例"],
+  "stat": {
+    "view": 10000,
+    "like": 500,
+    "coin": 100,
+    "favorite": 50,
+    "share": 30,
+    "reply": 20
+  },
+  "pic": "https://example.com/pic.jpg",
+  "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+  "subtitle": {
+    "available": true,
+    "lan": "zh-CN",
+    "full_text": "这是一段测试字幕\n第二行字幕内容",
+    "note": "字幕来自B站CC字幕接口"
+  },
+  "top_replies": [
+    {
+      "uname": "高赞用户",
+      "mid": 10001,
+      "like": 200,
+      "content": "顶！",
+      "rcount": 5,
+      "ctime": 1737000000,
+      "top_sub_reply": {
+        "uname": "回复用户",
+        "like": 180,
+        "content": "我也觉得很好"
+      }
+    }
+  ]
+}

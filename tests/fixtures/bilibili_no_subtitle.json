@@ -1,0 +1,29 @@
+{
+  "source": "bilibili",
+  "bvid": "BV1xxNoSub111",
+  "aid": 22222222,
+  "cid": 33333333,
+  "title": "无字幕视频",
+  "desc": "",
+  "owner": {
+    "name": "UP主2",
+    "mid": 20002
+  },
+  "pubdate": "2025-02-01 00:00:00",
+  "duration_sec": 120,
+  "tags": [],
+  "stat": {
+    "view": 100,
+    "like": 1,
+    "coin": 0,
+    "favorite": 0,
+    "share": 0,
+    "reply": 0
+  },
+  "url": "https://www.bilibili.com/video/BV1xxNoSub111",
+  "subtitle": {
+    "available": false,
+    "note": "该视频UP主未上传字幕，建议结合视频简介、标签及社区资料生成精华内容"
+  },
+  "top_replies": []
+}

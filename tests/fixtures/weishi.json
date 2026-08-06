@@ -1,0 +1,10 @@
+{
+  "source": "weishi",
+  "vid": "x1234567890ab",
+  "title": "微视测试视频",
+  "author": "微视UP",
+  "share_count": 42,
+  "url": "https://h5.weishi.qq.com/weishi/feed/x1234567890ab",
+  "subtitle": {"available": false, "note": "微视平台不支持字幕接口。"},
+  "note": "数据从页面HTML解析，可能不完整。请结合 WebSearch 搜索 + defuddle 抓取公开报道补充内容。"
+}
