@@ -1,0 +1,56 @@
+# {{ title or 'YouTube 视频' }}
+
+> 来源：YouTube · 频道：{{ owner.name or author or '未知' }}
+> 原始链接：{{ url }}
+{% if pubdate %}> 发布时间：{{ pubdate }}
+{% endif %}{% if duration_min %}> 视频时长：{{ duration_min }}分{{ duration_sec }}秒
+{% endif %}
+
+---
+
+## 一、视频概览
+
+| 项目 | 内容 |
+|------|------|
+| **标题** | {{ title }} |
+| **频道** | {{ owner.name or author }} |
+{% if channel_url %}| **频道链接** | {{ channel_url }} |
+{% endif %}{% if view_count %}| **播放量** | {{ view_count }} |
+{% endif %}{% if like_count %}| **点赞** | {{ like_count }} |
+{% endif %}{% if thumbnail %}| **封面** | {{ thumbnail }} |
+{% endif %}
+
+---
+
+## 二、字幕内容
+
+{% if subtitle.available %}
+{{ subtitle.full_text or subtitle.text }}
+{% else %}
+> ⚠️ {{ subtitle.note }}
+>
+> **建议**：复制视频标题到 WebSearch 搜索，用 defuddle 抓取第三方报道/字幕组资源补充内容。
+{% endif %}
+
+---
+
+## 三、视频描述
+
+{{ desc or description or '（无描述）' }}
+
+---
+
+## 四、参考资料
+
+- 原始链接：{{ url }}
+
+---
+
+> ⚠️ **重要声明**
+>
+> 本文档由 url-extract v{{ version }}（学术测试版）生成。{{ note }}
+> 部分内容可能来自 yt-dlp 公开元数据或 noembed 第三方代理，存在数据偏差。
+> 视频中独有的演示画面、语气强调、即兴发挥等内容无法被覆盖。
+>
+> **如需用于正式参考、引用或决策，请务必对照原始视频核实。**
+> 本工具请勿用于生产环境。

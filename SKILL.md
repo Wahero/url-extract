@@ -31,6 +31,9 @@ python3 extract.py "https://b23.tv/xxx" --output result.json --ima-raw
 | 来源 | 检测规则 | 抽取方式 |
 |---|---|---|
 | **B站视频** | `bilibili.com` / `b23.tv` / `BV号` | 公共 API（视频信息/标签/字幕/评论） |
+| **YouTube 视频** | `youtube.com/watch?v=` / `youtu.be/` | yt-dlp dump-json + 字幕（推荐装 yt-dlp），无 yt-dlp 时降级到 noembed.com 公开代理 |
+| **小红书笔记** | `xiaohongshu.com/discovery/item/` / `xhslink.com` / `xhslink.cn` | 重定向链解析 item_id（无登录态拿不到内容，强提示 WebSearch 补充） |
+| **抖音视频** | `douyin.com/video/` / `v.douyin.com` / `iesdouyin.com` | 长链直接解析 video_id（无签名拿不到内容，强提示 WebSearch 补充） |
 | **GitHub 仓库** | `github.com` | gh CLI → REST API → defuddle 三级降级 |
 | **腾讯微视** | `weishi.qq.com` / 微信插件链接 | 微信 UA 模拟 + WebSearch 补充 |
 | **一般网页** | 以上都不是 | defuddle CLI 一步提取 |
@@ -74,6 +77,24 @@ python3 extract.py "<链接>" --output /tmp/extract_result.json
      ```
   3. **降低频率 + 错峰**：cron 场景避免高峰期
 - **重试机制**：默认 3 次指数退避（1s/2s/4s），仅对 `BilibiliRiskControlError` 触发
+
+#### YouTube 视频
+- 优先：yt-dlp（需 `pip install yt-dlp`）拿完整元数据（title/channel/upload_date/view_count/like_count/description/字幕）
+- 降级：noembed.com 公开代理，仅 title/author/thumbnail
+- 字幕：自动下载 zh-Hans > zh-Hant > en 的 vtt 字幕，含轻量 WebVTT parser
+- 输出：`templates/youtube.md.j2`（类似 B 站结构）
+
+#### 小红书笔记（降级方案）
+- 现实：未登录/无 cookie 拿到的是空壳 HTML，defuddle 同样拿不到内容
+- 沙箱可做的：解析短链重定向链拿 item_id + type（note/video）
+- 模板：`templates/xiaohongshu.md.j2`（轻量，标记 partial=True）
+- 用户补充方式：复制笔记标题到 WebSearch 搜索，用 defuddle 抓第三方报道
+
+#### 抖音视频（降级方案）
+- 现实：需要 App 内置 UA + X-Sign 签名才能拿到内容
+- 沙箱可做的：从长链 `douyin.com/video/{id}` 或 `modal_id=` 解析 video_id
+- 模板：`templates/douyin.md.j2`（轻量，标记 partial=True）
+- 用户补充方式：同小红书（WebSearch + defuddle）
 
 #### GitHub 仓库
 - 脚本已自动三级降级（gh CLI → REST API → defuddle）
