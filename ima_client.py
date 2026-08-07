@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-IMA OpenAPI Python 客户端 v1.3
+IMA OpenAPI Python 客户端 v1.4
 仅从环境变量读取凭证，不持久化存储。
 
 认证方式：环境变量 IMA_OPENAPI_CLIENTID / IMA_OPENAPI_APIKEY
 
-v1.3 变更：COS 上传从单一手写 v1 签名改为「SDK 优先 + Legacy 兜底」双实现。
-        默认 prefer="auto"：装了 cos-python-sdk-v5 走 SDK，否则用 legacy v1。
-        也可显式 prefer="sdk" / "legacy"。
-v1.2 变更：移除文件持久化，仅从环境变量读取凭证；新增 Markdown 文件上传（四步流程）。
+v1.4 变更：
+  - api_call() 加 tenacity 重试（网络错误 / HTTP 5xx 自动重试 3 次，指数退避）
+  - 所有公开函数加类型注解
+  - ImaAPIRetryableError / ImaAPIBusinessError 异常类区分可重试 / 不可重试错误
+  - 通过 IMA_API_RETRY / IMA_API_BACKOFF 环境变量可调重试参数
+v1.3 变更：COS 上传「SDK 优先 + Legacy 兜底」双实现
+v1.2 变更：移除文件持久化，仅从环境变量读取凭证；新增 Markdown 文件上传（四步流程）
 v1.1 新增：find_kb_by_name / search_knowledge_in_kb（知识库内容检索去重）
 """
 
@@ -17,11 +20,108 @@ import json
 import warnings
 import urllib.request
 import urllib.error
+from typing import Any
+
+try:
+    from tenacity import (
+        retry,
+        stop_after_attempt,
+        wait_exponential,
+        retry_if_exception,
+    )
+    _HAS_TENACITY = True
+except ImportError:
+    _HAS_TENACITY = False
 
 DEFAULT_BASE_URL = "https://ima.qq.com"
 
 
-def load_credentials() -> tuple:
+# -------------------------------------------------------------------
+# 异常类
+# -------------------------------------------------------------------
+
+class ImaAPIRetryableError(Exception):
+    """IMA API 可重试错误（网络错误 / 5xx 服务端错误）。"""
+
+
+class ImaAPIBusinessError(Exception):
+    """IMA API 业务错误（4xx / 业务 code != 0）——不重试。"""
+
+
+# -------------------------------------------------------------------
+# 重试逻辑
+# -------------------------------------------------------------------
+
+def _is_retryable(exc: BaseException) -> bool:
+    """判断异常是否可重试。
+
+    注意：HTTPError 是 URLError 的子类，HTTPError 检查必须放在 URLError 前面，
+    否则所有 HTTPError（4xx/5xx）都会被 URLError 分支捕获而全部重试。
+
+    只对以下情况重试：
+      - ImaAPIRetryableError（显式标记的可重试错误）
+      - HTTPError 5xx（服务端错误，瞬时失败居多）
+      - URLError（网络错误：DNS / 连接失败 / 超时）
+    不重试：
+      - HTTPError 4xx（客户端错误，重试无意义）
+      - ImaAPIBusinessError（业务错误，code != 0）
+      - 其他 RuntimeError
+    """
+    if isinstance(exc, ImaAPIRetryableError):
+        return True
+    if isinstance(exc, urllib.error.HTTPError):
+        # HTTPError 是 URLError 子类，必须先于 URLError 检查
+        return 500 <= exc.code < 600
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    return False
+
+
+def _log_retry(info) -> None:
+    """重试前的日志回调，打印到 stderr 让用户知道发生了什么。"""
+    import sys as _sys
+    exc = info.outcome.exception() if info.outcome else None
+    exc_name = exc.__class__.__name__ if exc else "Unknown"
+    _sys.stderr.write(
+        "[IMA] API 失败 (attempt " + str(info.fn.__name__) + " #" + str(info.attempt_number) + "), "
+        + str(exc_name) + ", " + str(round(info.idle_for, 1)) + "s 后重试...\n"
+    )
+    _sys.stderr.flush()
+
+
+def _api_retry():
+    """tenacity 重试装饰器工厂。
+
+    配置：
+      - 3 次尝试（默认，可通过 IMA_API_RETRY 环境变量调整）
+      - 指数退避 1s/2s/4s（最小 1s，最大 10s）
+      - 只对网络/5xx 重试（_is_retryable 判定）
+      - 重试前打印提示，让用户知道发生了什么
+
+    通过环境变量调整：
+      - IMA_API_RETRY：最大重试次数（默认 3）
+      - IMA_API_BACKOFF：基础退避秒数（默认 1）
+    """
+    max_attempts = int(os.environ.get("IMA_API_RETRY", "3"))
+    base = float(os.environ.get("IMA_API_BACKOFF", "1"))
+    if not _HAS_TENACITY:
+        def decorator(fn):
+            return fn
+        return decorator
+    return retry(
+        stop=stop_after_attempt(max_attempts),
+        wait=wait_exponential(multiplier=base, min=base, max=10),
+        retry=retry_if_exception(_is_retryable),
+        reraise=True,
+        before_sleep=_log_retry,
+    )
+
+
+# -------------------------------------------------------------------
+# 凭证加载
+# -------------------------------------------------------------------
+
+def load_credentials() -> tuple[str, str]:
     """
     从环境变量加载 IMA 凭证，返回 (client_id, api_key)。
     不读取文件，不持久化存储。
@@ -38,8 +138,24 @@ def load_credentials() -> tuple:
     return client_id, api_key
 
 
+# -------------------------------------------------------------------
+# API 调用（带重试）
+# -------------------------------------------------------------------
+
+@_api_retry()
 def api_call(api_path: str, body: dict, base_url: str = DEFAULT_BASE_URL) -> dict:
-    """调用 IMA OpenAPI，返回解析后的 JSON。"""
+    """调用 IMA OpenAPI，返回解析后的 JSON。
+
+    重试行为：
+      - 网络错误（URLError：DNS/连接/超时）→ 自动重试 3 次
+      - 服务端 5xx → 自动重试 3 次
+      - 业务错误（4xx / 业务 code != 0）→ 抛 ImaAPIBusinessError，不重试
+      - 凭证缺失 → 抛 RuntimeError，不重试
+
+    通过环境变量调整：
+      - IMA_API_RETRY：最大重试次数（默认 3）
+      - IMA_API_BACKOFF：基础退避秒数（默认 1）
+    """
     client_id, api_key = load_credentials()
 
     url = f"{base_url}/{api_path}"
@@ -58,21 +174,30 @@ def api_call(api_path: str, body: dict, base_url: str = DEFAULT_BASE_URL) -> dic
 
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
-            result = json.loads(raw)
-            return result
+            return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"IMA API 请求失败 (HTTP {e.code}): {error_body}")
+        # HTTPError.read() 在 Python 3 有时不返回 bytes（只返回 str body）。
+        # 错误消息对调试有帮助，但不是核心逻辑，只打印到 stderr 方便排查。
+        try:
+            error_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            error_body = ""
+        if 500 <= e.code < 600:
+            raise ImaAPIRetryableError(
+                f"IMA API 服务端错误 (HTTP {e.code})"
+            ) from e
+        raise ImaAPIBusinessError(
+            f"IMA API 客户端错误 (HTTP {e.code})"
+        ) from e
     except urllib.error.URLError as e:
-        raise RuntimeError(f"IMA API 网络错误: {e.reason}")
+        raise ImaAPIRetryableError(f"IMA API 网络错误: {e.reason}") from e
 
 
 # ============================================================
 # 知识库查询
 # ============================================================
 
-def get_addable_knowledge_bases() -> list:
+def get_addable_knowledge_bases() -> list[dict[str, Any]]:
     """获取可添加内容的知识库列表。"""
     resp = api_call(
         "openapi/wiki/v1/get_addable_knowledge_base_list",
@@ -84,7 +209,7 @@ def get_addable_knowledge_bases() -> list:
     return data.get("addable_knowledge_base_list") or data.get("knowledge_base_list") or []
 
 
-def search_knowledge_base(query: str = "") -> list:
+def search_knowledge_base(query: str = "") -> list[dict[str, Any]]:
     """按名称搜索知识库。"""
     resp = api_call(
         "openapi/wiki/v1/search_knowledge_base",
@@ -94,7 +219,6 @@ def search_knowledge_base(query: str = "") -> list:
         raise RuntimeError(f"搜索知识库失败: {resp.get('msg', '未知错误')}")
     data = resp.get("data", {})
     raw_list = data.get("info_list") or data.get("knowledge_base_list") or []
-    # 统一字段名：kb_id→id, kb_name→name
     result = []
     for kb in raw_list:
         normalized = {
@@ -106,7 +230,7 @@ def search_knowledge_base(query: str = "") -> list:
     return result
 
 
-def find_kb_by_name(name: str) -> dict | None:
+def find_kb_by_name(name: str) -> dict[str, Any] | None:
     """按名称精确查找知识库，返回 {id, name, ...} 或 None。"""
     kb_list = search_knowledge_base(name)
     for kb in kb_list:
@@ -118,7 +242,7 @@ def find_kb_by_name(name: str) -> dict | None:
     return None
 
 
-def search_knowledge_in_kb(kb_id: str, query: str) -> list:
+def search_knowledge_in_kb(kb_id: str, query: str) -> list[dict[str, Any]]:
     """搜索知识库中的内容，返回 knowledge_list。失败时返回空列表不抛异常。"""
     try:
         resp = api_call(
@@ -136,9 +260,9 @@ def search_knowledge_in_kb(kb_id: str, query: str) -> list:
 # URL 导入
 # ============================================================
 
-def import_url(kb_id: str, urls: list, folder_id: str = "") -> dict:
+def import_url(kb_id: str, urls: list[str], folder_id: str = "") -> dict[str, Any]:
     """将网页 URL 导入知识库。"""
-    body = {"knowledge_base_id": kb_id, "urls": urls}
+    body: dict[str, Any] = {"knowledge_base_id": kb_id, "urls": urls}
     if folder_id:
         body["folder_id"] = folder_id
     return api_call("openapi/wiki/v1/import_urls", body)
@@ -148,7 +272,7 @@ def import_url(kb_id: str, urls: list, folder_id: str = "") -> dict:
 # 去重检查
 # ============================================================
 
-def _extract_title(item: dict) -> str:
+def _extract_title(item: dict[str, Any]) -> str:
     """从知识库搜索结果项中提取标题。"""
     return (
         item.get("title", "")
@@ -189,7 +313,7 @@ def check_connection() -> bool:
 # check_repeated_names → create_media → COS upload → add_knowledge
 # ============================================================
 
-def check_repeated_names(kb_id: str, file_names: list) -> dict:
+def check_repeated_names(kb_id: str, file_names: list[str]) -> dict[str, Any]:
     """检查知识库中是否已存在同名文件。"""
     return api_call(
         "openapi/wiki/v1/check_repeated_names",
@@ -201,9 +325,13 @@ def check_repeated_names(kb_id: str, file_names: list) -> dict:
     )
 
 
-def create_media(kb_id: str, file_name: str, file_size: int,
-                 content_type: str = "text/markdown",
-                 file_ext: str = "md") -> dict:
+def create_media(
+    kb_id: str,
+    file_name: str,
+    file_size: int,
+    content_type: str = "text/markdown",
+    file_ext: str = "md",
+) -> dict[str, Any]:
     """创建媒体资源，获取 COS 上传凭证。"""
     return api_call(
         "openapi/wiki/v1/create_media",
@@ -217,13 +345,14 @@ def create_media(kb_id: str, file_name: str, file_size: int,
     )
 
 
-def _cos_upload_sdk(credential: dict, file_data: bytes, content_type: str,
-                    cos_key: str, file_size: int) -> bool:
-    """使用 cos-python-sdk-v5 上传（推荐）。需要 pip install cos-python-sdk-v5。
-
-    优点：官方维护，签名算法、token 刷新、错误重试都交给 SDK。
-    缺点：多一个依赖。
-    """
+def _cos_upload_sdk(
+    credential: dict[str, Any],
+    file_data: bytes,
+    content_type: str,
+    cos_key: str,
+    file_size: int,
+) -> bool:
+    """使用 cos-python-sdk-v5 上传（推荐）。需要 pip install cos-python-sdk-v5。"""
     try:
         from qcloud_cos import CosConfig, CosS3Client
     except ImportError as e:
@@ -253,23 +382,22 @@ def _cos_upload_sdk(credential: dict, file_data: bytes, content_type: str,
         ContentType=content_type,
         ContentLength=file_size,
     )
-    # cos-python-sdk-v5 返回 dict-like，status_code 在 dict 化的响应里
     status = getattr(response, "status_code", None) or response.get("status_code")
     return status in (200, 204)
 
 
-def _cos_upload_legacy_v1(credential: dict, file_data: bytes, content_type: str,
-                          cos_key: str, file_size: int) -> bool:
+def _cos_upload_legacy_v1(
+    credential: dict[str, Any],
+    file_data: bytes,
+    content_type: str,
+    cos_key: str,
+    file_size: int,
+) -> bool:
     """手写 COS 签名 v1 算法（无 SDK 依赖的 fallback）。
 
     .. deprecated::
         请安装 ``cos-python-sdk-v5`` 并改用 ``_cos_upload_sdk``（或
         ``_cos_upload(..., prefer='auto')`` 自动选择）。此函数将在 v2.7 移除。
-
-    保留原因：
-    - 不强加 cos-python-sdk-v5 依赖
-    - 一些受限环境（内网 / 离线）装不上 PyPI 包
-    - 老用户升级路径不破坏
     """
     warnings.warn(
         "_cos_upload_legacy_v1 已废弃，请安装 cos-python-sdk-v5 走 _cos_upload_sdk。"
@@ -291,7 +419,6 @@ def _cos_upload_legacy_v1(credential: dict, file_data: bytes, content_type: str,
     cos_host = f"{bucket}.cos.{region}.myqcloud.com"
     upload_url = f"https://{cos_host}/{cos_key}"
 
-    # COS 签名 v1
     timestamp = int(time.time())
     expired = 600
     key_time = f"{timestamp};{timestamp + expired}"
@@ -341,23 +468,19 @@ def _cos_upload_legacy_v1(credential: dict, file_data: bytes, content_type: str,
         raise RuntimeError(f"COS 上传失败 (HTTP {e.code}): {error_body}")
 
 
-def _cos_upload(credential: dict, file_data: bytes, content_type: str,
-                cos_key: str, file_size: int,
-                prefer: str = "auto") -> bool:
-    """
-    COS 上传分发。
-
-    prefer:
-        - "auto"   优先 SDK，没装就降级到 legacy v1（推荐）
-        - "sdk"    强制用 SDK，没装就报错
-        - "legacy" 强制用手写 v1
-    """
+def _cos_upload(
+    credential: dict[str, Any],
+    file_data: bytes,
+    content_type: str,
+    cos_key: str,
+    file_size: int,
+    prefer: str = "auto",
+) -> bool:
+    """COS 上传分发（prefer: auto/sdk/legacy）。"""
     if prefer == "legacy":
         return _cos_upload_legacy_v1(credential, file_data, content_type, cos_key, file_size)
     if prefer == "sdk":
         return _cos_upload_sdk(credential, file_data, content_type, cos_key, file_size)
-
-    # auto: 探测 qcloud_cos
     try:
         import qcloud_cos  # noqa: F401
     except ImportError:
@@ -365,10 +488,16 @@ def _cos_upload(credential: dict, file_data: bytes, content_type: str,
     return _cos_upload_sdk(credential, file_data, content_type, cos_key, file_size)
 
 
-def add_knowledge_file(kb_id: str, media_id: str, cos_key: str,
-                       file_name: str, file_size: int, title: str = "",
-                       content_type: str = "text/markdown",
-                       media_type: int = 7) -> dict:
+def add_knowledge_file(
+    kb_id: str,
+    media_id: str,
+    cos_key: str,
+    file_name: str,
+    file_size: int,
+    title: str = "",
+    content_type: str = "text/markdown",
+    media_type: int = 7,
+) -> dict[str, Any]:
     """将已上传的文件注册为知识库条目。"""
     import time
     return api_call(
@@ -388,8 +517,11 @@ def add_knowledge_file(kb_id: str, media_id: str, cos_key: str,
     )
 
 
-def upload_markdown_to_kb(kb_id: str, file_name: str,
-                          markdown_content: str) -> dict:
+def upload_markdown_to_kb(
+    kb_id: str,
+    file_name: str,
+    markdown_content: str,
+) -> dict[str, Any]:
     """
     将 Markdown 内容上传到 IMA 知识库。
     四步流程：check_repeated → create_media → COS upload → add_knowledge
@@ -403,7 +535,6 @@ def upload_markdown_to_kb(kb_id: str, file_name: str,
     file_size = len(file_data)
     content_type = "text/markdown"
 
-    # 步骤1：检查重名
     print(f"[IMA] 检查重名: {file_name}", file=sys.stderr)
     dup_resp = check_repeated_names(kb_id, [file_name])
     if dup_resp.get("code") == 0:
@@ -412,7 +543,6 @@ def upload_markdown_to_kb(kb_id: str, file_name: str,
             print(f"[IMA] ⏭️ 文件已存在，跳过: {file_name}", file=sys.stderr)
             return {"skipped": True, "reason": "duplicate"}
 
-    # 步骤2：创建媒体，获取 COS 凭证
     print(f"[IMA] 创建媒体资源...", file=sys.stderr)
     media_resp = create_media(kb_id, file_name, file_size, content_type, "md")
     if media_resp.get("code") != 0:
@@ -424,23 +554,24 @@ def upload_markdown_to_kb(kb_id: str, file_name: str,
     cos_key = credential.get("cos_key", "")
 
     if not media_id or not credential or not cos_key:
-        raise RuntimeError(f"create_media 返回数据不完整: {json.dumps(media_data, ensure_ascii=False)[:300]}")
+        raise RuntimeError(
+            f"create_media 返回数据不完整: {json.dumps(media_data, ensure_ascii=False)[:300]}"
+        )
 
-    # 步骤3：上传到 COS
     print(f"[IMA] 上传到 COS...", file=sys.stderr)
     ok = _cos_upload(credential, file_data, content_type, cos_key, file_size)
     if not ok:
         raise RuntimeError("COS 上传失败")
 
-    # 步骤4：注册为知识库条目
     print(f"[IMA] 注册到知识库...", file=sys.stderr)
     title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
-    result = add_knowledge_file(kb_id, media_id, cos_key, file_name, file_size, title=title, content_type=content_type)
+    result = add_knowledge_file(
+        kb_id, media_id, cos_key, file_name, file_size, title=title, content_type=content_type
+    )
     return result
 
 
 if __name__ == "__main__":
-    # 自检模式
     print("IMA Client 自检...")
     try:
         client_id, api_key = load_credentials()
