@@ -102,6 +102,9 @@ _SOURCE_PREFIX = {
     'github': 'GitHub精华_',
     'weishi': '视频精华_',
     'webpage': '网页精华_',
+    'youtube': 'YouTube精华_',
+    'xiaohongshu': '小红书精华_',
+    'douyin': '抖音精华_',
 }
 
 def set_bili_cookies(sessdata: str = None, bili_jct: str = None, dedeuserid: str = None, dedeuserid_ckmd5: str = None) -> None:
@@ -355,6 +358,212 @@ def _find_local_node_modules() -> str | None:
 
 _DEFUDDLE_CMD, _DEFUDDLE_SHELL, _DEFUDDLE_CWD = _resolve_defuddle()
 
+# ============================================================
+# yt-dlp CLI 集成（跨平台自动探测，YouTube 视频抽取）
+# ============================================================
+#
+# 探测顺序：
+#   1. 环境变量 YTDLP_BIN（指向 yt-dlp 可执行文件）
+#   2. PATH 中的 yt-dlp / yt-dlp.exe
+#   3. python -m yt_dlp（fallback，需要 yt_dlp Python 包）
+#   4. 都没找到且 YTDLP_AUTO_INSTALL != 0：尝试 pip install yt-dlp
+#      (走阿里源 -i https://mirrors.aliyun.com/pypi/simple/ 避免 timeout)
+#   5. 都没有 → 返回空字符串，调用方应走 noembed 降级路径
+
+def _resolve_ytdlp() -> str:
+    """解析 yt-dlp 入口，返回命令字符串（含路径）。返回空表示未找到。"""
+    # 1. 显式覆盖
+    override = os.environ.get('YTDLP_BIN')
+    if override and os.path.isfile(override):
+        return override
+
+    # 2. PATH 中的 yt-dlp
+    ytdlp = shutil.which('yt-dlp') or shutil.which('yt-dlp.exe')
+    if ytdlp:
+        return ytdlp
+
+    # 3. python -m yt_dlp
+    try:
+        import yt_dlp
+        # python -m yt_dlp 走 -m，需要 sys.executable
+        return f'"{sys.executable}" -m yt_dlp'
+    except ImportError:
+        pass
+
+    # 4. 自动安装（除非显式禁用）
+    if os.environ.get('YTDLP_AUTO_INSTALL', '1') != '0':
+        print('[yt-dlp] 未找到，尝试 pip install yt-dlp ...', file=sys.stderr)
+        mirror = 'https://mirrors.aliyun.com/pypi/simple/'
+        try:
+            subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', '--break-system-packages', '-i', mirror, 'yt-dlp'],
+                timeout=180, check=False,
+            )
+        except Exception as e:
+            print(f'[yt-dlp] 自动安装失败: {e}', file=sys.stderr)
+        # 5. 装完再试
+        ytdlp = shutil.which('yt-dlp') or shutil.which('yt-dlp.exe')
+        if ytdlp:
+            return ytdlp
+
+    return ''
+
+
+_YTDLP_CMD = _resolve_ytdlp()
+
+
+def _run_ytdlp_dump_json(url: str, timeout: int = 12) -> dict | None:
+    """调 yt-dlp dump JSON。失败返回 None。
+
+    用临时文件代替 PIPE,避免 yt-dlp 内部 spawn 子进程时 pipe 阻塞。
+    超时后 kill + 短 wait,不 hang 父进程。
+    """
+    if not _YTDLP_CMD:
+        return None
+    import tempfile
+    import shlex
+    try:
+        cmd = shlex.split(_YTDLP_CMD) + [
+            '--dump-json',
+            '--no-warnings',
+            '--no-playlist',
+            '--skip-download',
+            url,
+        ]
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as stdout_f:
+            stdout_path = stdout_f.name
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.log', delete=False) as stderr_f:
+            stderr_path = stderr_f.name
+        try:
+            with open(stdout_path, 'w') as out_f, open(stderr_path, 'w') as err_f:
+                proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, text=True)
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    print(f'[yt-dlp] dump-json 超时 ({timeout}s)', file=sys.stderr)
+                    return None
+            with open(stdout_path, 'r', encoding='utf-8', errors='ignore') as f:
+                stdout = f.read()
+            with open(stderr_path, 'r', encoding='utf-8', errors='ignore') as f:
+                stderr = f.read()
+        finally:
+            for tp in [stdout_path, stderr_path]:
+                try:
+                    os.unlink(tp)
+                except OSError:
+                    pass
+        if proc.returncode != 0:
+            print(f'[yt-dlp] dump-json 失败 rc={proc.returncode}: {stderr[:200]}', file=sys.stderr)
+            return None
+        return json.loads(stdout)
+    except Exception as e:
+        print(f'[yt-dlp] dump-json 异常: {e}', file=sys.stderr)
+        return None
+
+
+def _parse_vtt_to_text(vtt_content: str) -> str:
+    """轻量 WebVTT → 纯文本 parser。
+    
+    去除 WEBVTT header / 时间戳行 / cue 编号，保留 cue 文本并去重。
+    """
+    lines = vtt_content.splitlines()
+    out = []
+    in_cue = False
+    for line in lines:
+        s = line.strip()
+        if not s:
+            in_cue = False
+            continue
+        if s.startswith('WEBVTT') or s.startswith('NOTE'):
+            continue
+        if '-->' in s and '\n' not in s:  # 时间戳行
+            in_cue = True
+            continue
+        if s.isdigit():  # cue 编号
+            continue
+        if in_cue:
+            # 去除 <c.classname>...</c> 等样式标签
+            import re as _re
+            clean = _re.sub(r'<[^>]+>', '', s)
+            if clean and (not out or out[-1] != clean):  # 简单去重
+                out.append(clean)
+    return '\n'.join(out)
+
+
+def _run_ytdlp_subtitle(url: str, workdir: str = None, timeout: int = 90) -> dict | None:
+    """用 yt-dlp 拿字幕（仅下载字幕文件，不下视频）。
+    
+    优先 zh-Hans > zh-Hant > en。返回 {'lan': 'zh-Hans', 'text': '...'} 或 None。
+    """
+    if not _YTDLP_CMD:
+        return None
+    try:
+        import shlex
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cmd = shlex.split(_YTDLP_CMD) + [
+                '--write-auto-sub',  # 拿自动生成字幕
+                '--write-subs',  # 也拿手动上传字幕
+                '--sub-langs', 'zh-Hans,zh-Hant,zh-CN,zh-TW,en,en-US,en-GB',
+                '--sub-format', 'vtt',
+                '--skip-download',
+                '--no-warnings',
+                '--no-playlist',
+                '-o', os.path.join(tmp, '%(id)s.%(ext)s'),
+                url,
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+            )
+            # 找到下载的 vtt 文件
+            for f in os.listdir(tmp):
+                if not f.endswith('.vtt'):
+                    continue
+                full = os.path.join(tmp, f)
+                with open(full, 'r', encoding='utf-8', errors='ignore') as fp:
+                    vtt = fp.read()
+                text = _parse_vtt_to_text(vtt)
+                if not text.strip():
+                    continue
+                # 推断语言（从文件名 like <id>.zh-Hans.vtt）
+                lan = 'unknown'
+                for part in f.split('.'):
+                    if part in ('zh-Hans', 'zh-Hant', 'zh-CN', 'zh-TW', 'en', 'en-US', 'en-GB'):
+                        lan = part
+                        break
+                return {'lan': lan, 'text': text, 'available': True, 'note': f'字幕来自 yt-dlp（{lan}）'}
+            return {'available': False, 'note': 'yt-dlp 未找到任何 vtt 字幕文件（视频可能无字幕）'}
+    except Exception as e:
+        return {'available': False, 'note': f'yt-dlp 字幕下载异常: {e}'}
+
+
+def fetch_youtube_noembed(url: str) -> dict | None:
+    """noembed.com 公开代理拿 YouTube 基础元数据（无 yt-dlp 时的降级路径）。
+    
+    返回 {'title', 'author_name', 'author_url', 'thumbnail_url', 'provider_name'} 或 None。
+    """
+    try:
+        r = requests.get(
+            'https://noembed.com/embed',
+            params={'url': url},
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; url-extract/2.6)'},
+            timeout=15,
+        )
+        r.raise_for_status()
+        d = r.json()
+        if 'error' in d:
+            return None
+        return d
+    except Exception as e:
+        print(f'[noembed] 请求失败: {e}', file=sys.stderr)
+        return None
+
+
 
 def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
     """
@@ -440,6 +649,15 @@ def detect_source(link: str) -> str:
         return 'github'
     if 'weishi.qq.com' in s or ('v.qq.com' in s and 'wx_tvplugin' in s):
         return 'weishi'
+    # YouTube
+    if 'youtube.com' in s or 'youtu.be' in s:
+        return 'youtube'
+    # 小红书 (短链 xhslink.com / 长链 xiaohongshu.com)
+    if 'xiaohongshu.com' in s or 'xhslink.com' in s or 'xhslink.cn' in s:
+        return 'xiaohongshu'
+    # 抖音 (短链 v.douyin.com / 长链 douyin.com / iesdouyin.com)
+    if 'douyin.com' in s or 'iesdouyin.com' in s:
+        return 'douyin'
     return 'webpage'
 
 # ============================================================
@@ -768,6 +986,289 @@ def extract_weishi_vid(link: str) -> str:
     return ''
 
 # ============================================================
+# YouTube 抽取
+# ============================================================
+
+def resolve_youtube_id(link: str) -> str:
+    """从 YouTube URL 解析 video_id。"""
+    m = re.search(r'(?:v=|youtu\.be/)([0-9A-Za-z_-]{11})', link)
+    if m:
+        return m.group(1)
+    return ''
+
+
+def extract_youtube(link: str) -> dict:
+    """YouTube 视频抽取。
+
+    优先级：
+      1. yt-dlp (--dump-json) → 拿 title/channel/upload_date/view_count/like_count/description
+      2. yt-dlp (--write-auto-sub) → 拿字幕 (zh-Hans > zh-Hant > en)
+      3. yt-dlp 失败 → noembed.com 降级（仅 title/author/thumbnail）
+    """
+    video_id = resolve_youtube_id(link)
+    if not video_id:
+        return {'source': 'youtube', 'url': link, 'error': '无法解析 YouTube video_id', 'note': '请检查 URL 格式'}
+
+    title = ''
+    author = ''
+    author_url = ''
+    thumbnail = ''
+    upload_date = ''
+    view_count = 0
+    like_count = 0
+    duration_sec = 0
+    description = ''
+    source_note = ''
+
+    # 路径 A: yt-dlp dump-json
+    ytdlp_data = _run_ytdlp_dump_json(link)
+    ytdlp_available = bool(ytdlp_data)
+    if ytdlp_data:
+        title = ytdlp_data.get('title', '') or title
+        author = ytdlp_data.get('channel', '') or ytdlp_data.get('uploader', '') or author
+        author_url = ytdlp_data.get('channel_url', '') or author_url
+        thumbnail = ytdlp_data.get('thumbnail', '') or thumbnail
+        upload_date = ytdlp_data.get('upload_date', '') or upload_date
+        view_count = ytdlp_data.get('view_count', 0) or 0
+        like_count = ytdlp_data.get('like_count', 0) or 0
+        duration_sec = ytdlp_data.get('duration', 0) or 0
+        description = ytdlp_data.get('description', '') or description
+        source_note = '数据来源：yt-dlp (--dump-json)'
+    else:
+        # 路径 B: noembed 降级
+        noembed_data = fetch_youtube_noembed(link)
+        if noembed_data:
+            title = noembed_data.get('title', '') or title
+            author = noembed_data.get('author_name', '') or author
+            author_url = noembed_data.get('author_url', '') or author_url
+            thumbnail = noembed_data.get('thumbnail_url', '') or thumbnail
+            source_note = '数据来源：noembed.com（yt-dlp 不可用时的降级路径，无播放量/点赞/描述/字幕）'
+        else:
+            return {
+                'source': 'youtube', 'url': link, 'video_id': video_id,
+                'error': 'yt-dlp 不可用且 noembed.com 也失败',
+                'note': '请检查网络或安装 yt-dlp（pip install yt-dlp）',
+            }
+
+    # 字幕（仅 yt-dlp 路径才尝试，因为 noembed 不提供字幕）
+    # 如果 yt-dlp dump-json 都失败了，字幕也大概率不可用，直接跳过节省 90s
+    subtitle = {'available': False, 'note': '未尝试获取字幕'}
+    if ytdlp_available:
+        sub = _run_ytdlp_subtitle(link)
+        if sub:
+            subtitle = sub
+
+    return {
+        'source': 'youtube',
+        'video_id': video_id,
+        'title': title,
+        'url': f'https://www.youtube.com/watch?v={video_id}',
+        'owner': {'name': author, 'url': author_url, 'mid': ''},
+        'author': author,
+        'channel_url': author_url,
+        'thumbnail': thumbnail,
+        'pic': thumbnail,
+        'pubdate': _fmt_youtube_date(upload_date),
+        'duration_sec': duration_sec,
+        'view_count': view_count,
+        'like_count': like_count,
+        'stat': {'view': view_count, 'like': like_count},
+        'desc': description,
+        'description': description,
+        'subtitle': subtitle,
+        'note': source_note,
+    }
+
+
+def _fmt_youtube_date(upload_date: str) -> str:
+    """yt-dlp upload_date 格式 YYYYMMDD → 'YYYY-MM-DD HH:MM:SS'."""
+    if not upload_date or len(upload_date) != 8:
+        return upload_date
+    try:
+        return f'{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]} 00:00:00'
+    except Exception:
+        return upload_date
+
+
+# ============================================================
+# 小红书 抽取（降级方案：defuddle 抓公开页 + 强 note 提示）
+# ============================================================
+
+def resolve_xhs_url(link: str) -> dict:
+    """从 xhslink.com 短链 / xiaohongshu.com 长链 解析 item_id + 类型。
+
+    xhslink.com 走微信 OAuth 中转，redirect URL 含 xiaohongshu.com item path。
+    返回 {'item_id': str, 'kind': 'video'|'note'|'unknown', 'canonical_url': str}。
+    """
+    item_id = ''
+    kind = 'unknown'
+    canonical_url = link
+
+    import re as _re
+    import urllib.parse as _up
+
+    def _extract_from_url(u: str):
+        """从单个 URL 提取 (item_id, kind)，找到就返回 (id, kind) 否则 (None, None)。"""
+        if not u:
+            return None, None
+        m = _re.search(r'/(?:discovery|exploration)/item/([0-9a-f]{20,32})', u, _re.I)
+        if not m:
+            return None, None
+        iid = m.group(1)
+        kind = 'unknown'
+        m2 = _re.search(r'[?&]type=(\w+)', u)
+        if m2:
+            kind = m2.group(1)
+        return iid, kind
+
+    # 1) 长链：直接匹配 link
+    item_id, kind = _extract_from_url(link)
+    if item_id:
+        canonical_url = link
+    else:
+        # 2) 短链：xhslink.cn/o/xxx → 重定向链 → 找 xhs URL
+        try:
+            r = requests.get(
+                link,
+                headers={'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42(0x18002a2f) NetType/WIFI Language/zh_CN'},
+                allow_redirects=True,
+                timeout=10,
+            )
+            # 遍历所有 redirect URLs + final URL
+            all_urls = [h.url for h in r.history] + [r.url]
+            # 优先 Location header（如果存在）
+            loc = r.headers.get('Location', '') or r.headers.get('location', '') or ''
+            if loc:
+                all_urls.insert(0, loc)
+            for u in all_urls:
+                # 处理 wechat 中转 URL：从 query string 的 redirect_uri 解码后再试
+                if 'weixin.qq.com' in u and 'redirect_uri=' in u:
+                    parsed = _up.urlparse(u)
+                    qs = _up.parse_qs(parsed.query)
+                    if 'redirect_uri' in qs:
+                        decoded = _up.unquote(qs['redirect_uri'][0])
+                        iid2, kind2 = _extract_from_url(decoded)
+                        if iid2:
+                            item_id, kind = iid2, kind2 or kind
+                            canonical_url = decoded
+                            break
+                iid2, kind2 = _extract_from_url(u)
+                if iid2:
+                    item_id, kind = iid2, kind2 or kind
+                    canonical_url = u
+                    break
+        except Exception:
+            pass
+
+    return {'item_id': item_id or '', 'kind': kind or 'unknown', 'canonical_url': canonical_url or link}
+
+
+def extract_xiaohongshu(link: str) -> dict:
+    """小红书笔记/视频抽取（降级方案）。
+
+    现实：小红书页面是 client-side rendered，未登录/沙箱访问拿到的是空壳 HTML。
+    defuddle 同样拿不到内容（只能拿到 og:title/description，但沙箱甚至连 og meta 都没有）。
+    所以：本函数主要返回 item_id + 强 note 提示用户用 WebSearch 搜索同标题补充。
+    """
+    parsed = resolve_xhs_url(link)
+    item_id = parsed['item_id']
+    canonical_url = parsed['canonical_url']
+    kind = parsed['kind']
+
+    note = (
+        '⚠️ 小红书需要登录态才能获取内容。沙箱 / 无 cookie 环境只能拿到 item_id，'
+        '无法获取笔记文字/图片/视频元数据。'
+        '**建议：复制笔记标题到 WebSearch 搜索，用 defuddle 抓取第三方报道补充内容。**'
+    )
+    if not item_id:
+        note = '⚠️ 无法解析小红书 item_id（短链可能需要先在微信内打开一次）。' + note
+
+    return {
+        'source': 'xiaohongshu',
+        'item_id': item_id,
+        'kind': kind,
+        'url': canonical_url or link,
+        'title': '',
+        'desc': '',
+        'note': note,
+        'partial': True,  # 标记为部分成功（issue #4 验收要求）
+    }
+
+
+# ============================================================
+# 抖音 抽取（降级方案）
+# ============================================================
+
+def resolve_douyin_url(link: str) -> dict:
+    """从 v.douyin.com 短链 / douyin.com / iesdouyin.com 长链解析 video_id。"""
+    video_id = ''
+    canonical_url = link
+
+    # 长链: douyin.com/video/<id> 或 modal_id=<id>
+    m = re.search(r'/video/(\d{15,20})', link)
+    if m:
+        video_id = m.group(1)
+    else:
+        m2 = re.search(r'modal_id=(\d{15,20})', link)
+        if m2:
+            video_id = m2.group(1)
+
+    if not video_id:
+        # 短链: v.douyin.com/<hashcode> → 302 重定向拿 video_id
+        try:
+            r = requests.head(
+                link,
+                headers={'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'},
+                allow_redirects=True,
+                timeout=10,
+            )
+            final = r.url
+            m3 = re.search(r'/video/(\d{15,20})', final)
+            if m3:
+                video_id = m3.group(1)
+                canonical_url = final
+            else:
+                m4 = re.search(r'modal_id=(\d{15,20})', final)
+                if m4:
+                    video_id = m4.group(1)
+                    canonical_url = final
+        except Exception:
+            pass
+
+    return {'video_id': video_id, 'canonical_url': canonical_url}
+
+
+def extract_douyin(link: str) -> dict:
+    """抖音视频抽取（降级方案）。
+
+    现实：抖音同样需要 App 内置 UA / X-Sign 签名才能拿到内容。
+    沙箱/无 cookie 只能拿到 video_id，无标题/描述/视频流。
+    """
+    parsed = resolve_douyin_url(link)
+    video_id = parsed['video_id']
+    canonical_url = parsed['canonical_url']
+
+    note = (
+        '⚠️ 抖音需要 App 内置 UA + X-Sign 签名才能获取内容。沙箱/无签名环境只能拿到 video_id，'
+        '无法获取视频元数据。'
+        '**建议：复制视频标题到 WebSearch 搜索，用 defuddle 抓取第三方报道补充内容。**'
+    )
+    if not video_id:
+        note = '⚠️ 无法解析抖音 video_id（短链可能需要先在抖音 App 内打开一次）。' + note
+
+    return {
+        'source': 'douyin',
+        'video_id': video_id,
+        'url': canonical_url or link,
+        'title': '',
+        'desc': '',
+        'note': note,
+        'partial': True,
+    }
+
+
+
+# ============================================================
 # 通用网页 抽取（defuddle 替代 WebFetch）
 # ============================================================
 
@@ -863,6 +1364,12 @@ def extract(link: str) -> dict:
         return extract_github(link)
     elif source == 'weishi':
         return extract_weishi(link)
+    elif source == 'youtube':
+        return extract_youtube(link)
+    elif source == 'xiaohongshu':
+        return extract_xiaohongshu(link)
+    elif source == 'douyin':
+        return extract_douyin(link)
     else:
         return extract_webpage(link)
 
@@ -949,6 +1456,16 @@ def _build_context_for_source(data: dict) -> dict:
         'content_markdown': data.get('content_markdown', ''),
         'note': data.get('note', ''),
         'share_count': data.get('share_count', 0),
+        # issue #4 新增: xhs / douyin / youtube 专用字段
+        'item_id': data.get('item_id', '') or '',
+        'kind': data.get('kind', 'unknown') or 'unknown',
+        'video_id': data.get('video_id', '') or '',
+        'channel_url': data.get('channel_url', '') or '',
+        'thumbnail': data.get('thumbnail', '') or data.get('pic', '') or '',
+        'view_count': data.get('view_count', 0) or 0,
+        'like_count': data.get('like_count', 0) or 0,
+        'description': data.get('description', '') or data.get('desc', '') or '',
+        'partial': data.get('partial', False),
     }
 
 

@@ -4,6 +4,9 @@ jinja2>=3.1
 # tenacity: B 站风控重试（推荐装, 不装也能跑只是失去重试能力）
 # 国内可用 `pip install -i https://mirrors.aliyun.com/pypi/simple/ tenacity`
 tenacity>=8.0
+# yt-dlp: YouTube 视频元数据 + 字幕提取（推荐装, 不装自动降级到 noembed.com 公开代理, 只拿标题/作者/封面）
+# 国内可用 `pip install -i https://mirrors.aliyun.com/pypi/simple/ yt-dlp`
+# yt-dlp>=2024.1
 # Optional: cos-python-sdk-v5 装上后 ima_client 走 SDK 上传（推荐）
 # 留空表示不强制；生产环境建议 `pip install cos-python-sdk-v5`
 # cos-python-sdk-v5>=5.8

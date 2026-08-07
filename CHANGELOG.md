@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- **新来源支持：YouTube / 小红书 / 抖音**（issue #4）：
+  - **YouTube**：检测 `youtube.com/watch?v=` / `youtu.be/`，优先 yt-dlp (--dump-json + --write-auto-sub) 拿完整元数据 + 字幕，无 yt-dlp 时降级到 noembed.com 公开代理（仅 title/author/thumbnail）。含轻量 WebVTT parser。
+  - **小红书**：检测 `xiaohongshu.com` / `xhslink.com` / `xhslink.cn`，重定向链解析 item_id + type（note/video）。无登录态拿不到内容，标记 partial=True，强提示 WebSearch 补充。
+  - **抖音**：检测 `douyin.com` / `v.douyin.com` / `iesdouyin.com`，长链直接解析 video_id。无 X-Sign 签名拿不到内容，标记 partial=True，强提示 WebSearch 补充。
+  - 3 个新模板：`templates/{youtube,xiaohongshu,douyin}.md.j2`
+  - 32 个新单测：`tests/test_new_sources.py`（detect/resolve/extract/模板渲染/VTT 解析）
+  - `_SOURCE_PREFIX` 加 3 个前缀：`YouTube精华_` / `小红书精华_` / `抖音精华_`
+- **依赖**：`yt-dlp` 加入 `requirements.txt` 注释（不强制，未装自动降级 noembed）
+- **yt-dlp 探测** `_resolve_ytdlp()`：复用 defuddle 模式，按 `YTDLP_BIN` env → PATH yt-dlp → `python -m yt_dlp` → `pip install yt-dlp --break-system-packages -i 阿里源` 顺序探测
+- **Popen 临时文件**：`_run_ytdlp_dump_json` 用临时文件代替 PIPE，避免 yt-dlp spawn 子进程时 pipe 阻塞
 - **B站风控缓解**（issue #3）：
   - 新增 `--sessdata` / `--bili-jct` / `--dedeuserid` CLI 参数 + `BILIBILI_SESSDATA` / `BILIBILI_BILI_JCT` / `BILIBILI_DEDEUSERID` 环境变量，注入 B站 Cookie 缓解风控。
   - 新增 `--wbi-sign on` 开关，开启后自动给 view/player wbi v2/reply 接口加 wbi 签名（无需登录）。实现参考 [socialsisteryi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md)，含 1h mixin_key 缓存。
