@@ -1,6 +1,9 @@
 requests>=2.28
 beautifulsoup4>=4.12
 jinja2>=3.1
+# tenacity: B 站风控重试（推荐装, 不装也能跑只是失去重试能力）
+# 国内可用 `pip install -i https://mirrors.aliyun.com/pypi/simple/ tenacity`
+tenacity>=8.0
 # Optional: cos-python-sdk-v5 装上后 ima_client 走 SDK 上传（推荐）
 # 留空表示不强制；生产环境建议 `pip install cos-python-sdk-v5`
 # cos-python-sdk-v5>=5.8
