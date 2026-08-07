@@ -32,8 +32,28 @@ import re
 import json
 import subprocess
 import argparse
+import logging
+import time
+import hashlib
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
+
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+    _HAS_TENACITY = True
+except ImportError:
+    _HAS_TENACITY = False
+    # 提供 no-op 占位，让无 tenacity 环境下代码仍可 import（仅失去重试能力）
+    def retry(*dargs, **dkwargs):
+        if len(dargs) == 1 and callable(dargs[0]) and not dkwargs:
+            return dargs[0]
+        def decorator(fn):
+            return fn
+        return decorator
+    def stop_after_attempt(_): return None
+    def wait_exponential(**_): return None
+    def retry_if_exception_type(_): return None
 
 try:
     import requests
@@ -53,6 +73,27 @@ HEADERS = {
     'Referer': 'https://www.bilibili.com/',
 }
 
+# B站 Cookie 全局状态（可选，由 set_bili_cookies() 注入）
+# 用途：未登录 IP 容易被 B 站风控（-352/-412/-799/-101），
+#      注入 SESSDATA 后可大幅降低风控触发概率。
+_BILI_COOKIES = {
+    'SESSDATA': None,
+    'bili_jct': None,
+    'DedeUserID': None,
+    'DedeUserID__ckMd5': None,
+}
+
+# B站风控响应码（code 字段非 0 时表示风控或鉴权失败）
+# 完整列表参考 https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/errcode.md
+_BILI_RISK_CODES = {
+    -101: '未登录或登录已过期（Cookie 缺失或失效）',
+    -352: '风控等级升级（请稍后重试或注入 SESSDATA）',
+    -412: '请求被拦截（IP 触发风控）',
+    -799: '请求过于频繁（被限流）',
+    -509: '请求频率超限（限流）',
+    -1200: 'API 调用被风控（需 SESSDATA）',
+}
+
 # 模板与来源前缀
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(_SCRIPT_DIR, 'templates')
@@ -62,6 +103,176 @@ _SOURCE_PREFIX = {
     'weishi': '视频精华_',
     'webpage': '网页精华_',
 }
+
+def set_bili_cookies(sessdata: str = None, bili_jct: str = None, dedeuserid: str = None, dedeuserid_ckmd5: str = None) -> None:
+    """注入 B站 Cookie（用于缓解风控）。任一参数为 None 则不更新该项。
+
+    推荐通过命令行参数 --sessdata / --bili-jct / --dedeuserid 间接调用。
+    也可通过环境变量 BILIBILI_SESSDATA / BILIBILI_BILI_JCT / BILIBILI_DEDEUSERID 设置。
+    """
+    if sessdata is not None:
+        _BILI_COOKIES['SESSDATA'] = sessdata
+    if bili_jct is not None:
+        _BILI_COOKIES['bili_jct'] = bili_jct
+    if dedeuserid is not None:
+        _BILI_COOKIES['DedeUserID'] = dedeuserid
+    if dedeuserid_ckmd5 is not None:
+        _BILI_COOKIES['DedeUserID__ckMd5'] = dedeuserid_ckmd5
+
+
+def _bili_cookie_header() -> str:
+    """把 _BILI_COOKIES 序列化成 Cookie 请求头字段（只包含非空项）。"""
+    parts = []
+    for k, v in _BILI_COOKIES.items():
+        if v:
+            parts.append(f'{k}={v}')
+    return '; '.join(parts)
+
+
+class BilibiliRiskControlError(Exception):
+    """B站风控异常。当接口返回 code ∈ _BILI_RISK_CODES 时抛出。"""
+    def __init__(self, code: int, message: str, bvid_or_aid: str = ''):
+        self.code = code
+        self.message = message
+        self.bvid_or_aid = bvid_or_aid
+        hint = _BILI_RISK_CODES.get(code, '未知风控码')
+        super().__init__(f'B站风控触发 (code={code} {hint}): {message} [bvid/aid={bvid_or_aid}]')
+
+
+def _check_bili_risk(d: dict, bvid_or_aid: str = '') -> None:
+    """检查 B站 API 响应是否为风控。是则抛出 BilibiliRiskControlError。"""
+    code = d.get('code')
+    if code is None or code == 0:
+        return
+    if code in _BILI_RISK_CODES:
+        raise BilibiliRiskControlError(code, d.get('message', ''), bvid_or_aid)
+    # 其它非 0 code 仍然静默返回给上层（兼容 tags/replies 等容错场景）
+
+
+def _bili_retry():
+    """tenacity 重试装饰器工厂：3 次，指数退避 1s/2s/4s，仅对 BilibiliRiskControlError 触发重试。"""
+    if not _HAS_TENACITY:
+        # 无 tenacity 时退化为空装饰器（不重试）
+        def decorator(fn):
+            return fn
+        return decorator
+    return retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(BilibiliRiskControlError),
+        reraise=True,
+    )
+
+
+def _bili_get(url: str, params: dict, bvid_or_aid: str = '', timeout: int = 15):
+    """带 Cookie + 风控检测 + 自动重试的 B站 GET 请求。返回 dict。"""
+    headers = dict(HEADERS)
+    cookie_str = _bili_cookie_header()
+    if cookie_str:
+        headers['Cookie'] = cookie_str
+
+    # 如果启用 wbi 签名，先签名（注意：签名后 params 不再可变）
+    if _WBI_ENABLED:
+        params = _wbi_sign(params)
+
+    @_bili_retry()
+    def _do_get():
+        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        d = r.json()
+        _check_bili_risk(d, bvid_or_aid)
+        return d
+    return _do_get()
+
+
+
+# ============================================================
+# B站 wbi 签名（参考 socialsisteryi/bilibili-API-collect）
+# ============================================================
+#
+# 用途：view / player / reply 等接口在某些 IP/UA 组合下会被 B 站拦截，
+#      即使无 Cookie，加 wbi 签名也能提高成功率。
+# 算法：从 nav 接口拿 wbi_img，提取 key，排序 md5 后取前 32 位作 mixin_key，
+#      对请求参数按 key 排序 + 编码 + 加 wts + 计算 w_rid。
+#
+# 启用方式：--wbi-sign on（默认 off，因为 nav 接口本身有调用成本）
+#
+# 参考：https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md
+
+_WBI_MIXIN_KEY_TABLE = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+]
+
+# 模块级缓存：避免每次请求都调 nav 接口
+_WBI_MIXIN_KEY_CACHE = {'key': None, 'expires_at': 0}
+_WBI_TTL_SEC = 3600  # 1 小时
+
+# 是否启用 wbi 签名的开关（由 --wbi-sign CLI 参数控制）
+_WBI_ENABLED = False
+
+
+def set_wbi_enabled(enabled: bool) -> None:
+    """启用/禁用 wbi 签名。"""
+    global _WBI_ENABLED
+    _WBI_ENABLED = bool(enabled)
+
+
+def _get_mixin_key() -> str:
+    """获取 wbi 签名用的 mixin_key（带 1 小时缓存）。失败时抛 RuntimeError。"""
+    now = int(time.time())
+    if _WBI_MIXIN_KEY_CACHE['key'] and _WBI_MIXIN_KEY_CACHE['expires_at'] > now:
+        return _WBI_MIXIN_KEY_CACHE['key']
+
+    headers = dict(HEADERS)
+    cookie_str = _bili_cookie_header()
+    if cookie_str:
+        headers['Cookie'] = cookie_str
+    r = requests.get(
+        'https://api.bilibili.com/x/web-interface/nav',
+        headers=headers,
+        timeout=10,
+    )
+    r.raise_for_status()
+    d = r.json()
+    wbi_img = d.get('data', {}).get('wbi_img', {})
+    img_url = wbi_img.get('img_url', '')
+    sub_url = wbi_img.get('sub_url', '')
+    if not img_url or not sub_url:
+        raise RuntimeError(f'B站 nav 接口未返回 wbi_img: code={d.get("code")} message={d.get("message")}')
+
+    # 从 URL 末尾提取 32 字符 key（去掉 .png）
+    img_key = img_url.rsplit('/', 1)[-1].split('.')[0]
+    sub_key = sub_url.rsplit('/', 1)[-1].split('.')[0]
+    raw = img_key + sub_key
+    mixin = ''.join(raw[i] for i in _WBI_MIXIN_KEY_TABLE)[:32]
+    _WBI_MIXIN_KEY_CACHE.update({'key': mixin, 'expires_at': now + _WBI_TTL_SEC})
+    return mixin
+
+
+_SPECIAL_CHARS_RE = re.compile(r"[!'()*]")
+
+
+def _wbi_sign(params: dict) -> dict:
+    """对 params 加 wts + w_rid，返回新 dict（不修改入参）。
+
+    算法：
+      1. 加 wts = 当前时间戳
+      2. 过滤掉 value 含特殊字符 !'()* 的 key
+      3. 按 key 排序
+      4. urlencode 后拼接 mixin_key
+      5. md5 得到 w_rid
+    """
+    mixin = _get_mixin_key()
+    signed = dict(params)
+    signed['wts'] = int(time.time())
+    signed = {k: v for k, v in signed.items() if not _SPECIAL_CHARS_RE.search(str(v))}
+    signed = dict(sorted(signed.items()))
+    query = urllib.parse.urlencode(signed)
+    w_rid = hashlib.md5((mixin + query).encode('utf-8')).hexdigest()
+    signed['w_rid'] = w_rid
+    return signed
+
 
 # ============================================================
 # defuddle CLI 集成（跨平台自动探测）
@@ -286,27 +497,40 @@ def resolve_bvid(link_or_bvid: str) -> str:
     sys.exit(1)
 
 def fetch_bili_video_info(bvid: str) -> dict:
-    r = requests.get('https://api.bilibili.com/x/web-interface/view', params={'bvid': bvid}, headers=HEADERS, timeout=15)
-    d = r.json()
+    """获取B站视频基本信息。失败时抛 BilibiliRiskControlError 或其它异常。"""
+    d = _bili_get(
+        'https://api.bilibili.com/x/web-interface/view',
+        params={'bvid': bvid},
+        bvid_or_aid=bvid,
+    )
     if d.get('code') != 0:
-        print(f"ERROR: 获取B站视频信息失败: {d.get('message')}", file=sys.stderr)
-        sys.exit(1)
+        # 走到这里说明不是风控码（_bili_get 已处理风控），是其它业务错误
+        raise BilibiliRiskControlError(d.get('code'), d.get('message', ''), bvid)
     return d['data']
 
 def fetch_bili_tags(bvid: str) -> list:
+    """获取B站视频标签。失败容错返回空列表。"""
     try:
-        r = requests.get('https://api.bilibili.com/x/tag/archive/tags', params={'bvid': bvid}, headers=HEADERS, timeout=15)
-        d = r.json()
+        d = _bili_get(
+            'https://api.bilibili.com/x/tag/archive/tags',
+            params={'bvid': bvid},
+            bvid_or_aid=bvid,
+        )
         if d.get('code') == 0:
             return [t.get('tag_name') for t in d.get('data', [])]
     except Exception:
+        # tags 是辅助信息，失败不影响主流程
         pass
     return []
 
 def fetch_bili_subtitle(bvid: str, cid: int) -> dict:
+    """获取B站视频字幕。失败容错返回 {'available': False, 'note': ...}。"""
     try:
-        r = requests.get('https://api.bilibili.com/x/player/wbi/v2', params={'bvid': bvid, 'cid': cid}, headers=HEADERS, timeout=15)
-        d = r.json()
+        d = _bili_get(
+            'https://api.bilibili.com/x/player/wbi/v2',
+            params={'bvid': bvid, 'cid': cid},
+            bvid_or_aid=bvid,
+        )
         subs = d.get('data', {}).get('subtitle', {}).get('subtitles', [])
         if subs:
             sub_url = subs[0].get('subtitle_url', '')
@@ -314,6 +538,7 @@ def fetch_bili_subtitle(bvid: str, cid: int) -> dict:
                 sub_url = 'https:' + sub_url
             elif not sub_url.startswith('http'):
                 sub_url = 'https://' + sub_url
+            # 字幕内容文件是 B站 CDN，普通 GET 即可（不需要 wbi 签名也不需要风控检测）
             sr = requests.get(sub_url, headers=HEADERS, timeout=15)
             sdata = sr.json()
             lines = [item.get('content', '') for item in sdata.get('body', [])]
@@ -328,9 +553,13 @@ def fetch_bili_subtitle(bvid: str, cid: int) -> dict:
         return {'available': False, 'note': f'字幕接口请求异常: {e}'}
 
 def fetch_bili_top_replies(aid: int, top_n: int = 3) -> list:
+    """获取B站视频热门评论。失败容错返回空列表。"""
     try:
-        r = requests.get('https://api.bilibili.com/x/v2/reply/main', params={'type': 1, 'oid': aid, 'mode': 3, 'next': 0, 'ps': 30}, headers=HEADERS, timeout=15)
-        d = r.json()
+        d = _bili_get(
+            'https://api.bilibili.com/x/v2/reply/main',
+            params={'type': 1, 'oid': aid, 'mode': 3, 'next': 0, 'ps': 30},
+            bvid_or_aid=str(aid),
+        )
         if d.get('code') != 0:
             return []
         replies = d.get('data', {}).get('replies') or []
@@ -846,7 +1075,18 @@ def main():
     parser.add_argument('--ima-kb', type=str, default='', help='目标 IMA 知识库名称（需配合 --upload-ima）')
     parser.add_argument('--ima-raw', action='store_true', help='上传 Markdown 文档到 IMA「RAW」个人知识库')
     parser.add_argument('--ima-raw-md', type=str, default='', help='指定外部 Markdown 文件路径，优先上传该文件（配合 --ima-raw 使用，用于 agent 生成的高质量精华文档）')
+    # B站 风控缓解参数（任一缺失则从对应环境变量读取，都缺失则不注入 Cookie）
+    parser.add_argument('--sessdata', type=str, default=os.environ.get('BILIBILI_SESSDATA', ''), help='B站 SESSDATA Cookie，用于缓解风控（也可设环境变量 BILIBILI_SESSDATA）')
+    parser.add_argument('--bili-jct', type=str, default=os.environ.get('BILIBILI_BILI_JCT', ''), help='B站 bili_jct Cookie（也可设环境变量 BILIBILI_BILI_JCT）')
+    parser.add_argument('--dedeuserid', type=str, default=os.environ.get('BILIBILI_DEDEUSERID', ''), help='B站 DedeUserID Cookie（也可设环境变量 BILIBILI_DEDEUSERID）')
+    parser.add_argument('--wbi-sign', choices=['on', 'off'], default='off', help='是否对 B站 API 请求加 wbi 签名（默认 off。开启会增加一次 nav 接口调用，但能提高 view/player/reply 接口在风控 IP 上的成功率）')
     args = parser.parse_args()
+
+    # 注入 B站 Cookie + wbi 开关（如果提供了 SESSDATA 或 wbi-sign on）
+    if args.sessdata:
+        set_bili_cookies(sessdata=args.sessdata, bili_jct=args.bili_jct or None, dedeuserid=args.dedeuserid or None)
+    if args.wbi_sign == 'on':
+        set_wbi_enabled(True)
 
     data = extract(args.link)
     data['extracted_at'] = datetime.now(tz=CST).strftime('%Y-%m-%d %H:%M:%S')

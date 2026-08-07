@@ -53,6 +53,28 @@ python3 extract.py "<链接>" --output /tmp/extract_result.json
 - `subtitle.available=true` → 用 `subtitle.full_text` 作为核心素材
 - `subtitle.available=false` → 用 WebSearch 搜索同标题社区文章 → defuddle 抓正文 → 整合还原；或 agent 自行生成完整 Markdown 后通过 `--ima-raw-md` 上传
 
+**B站风控缓解**（推荐配置,生产环境必看）
+
+- **症状**：extract 报 `BilibiliRiskControlError (code=-352/-412/-101)` 表明 IP 触发 B 站风控，3 次重试后仍失败
+- **根因**：未登录 IP 高频请求被 B 站风控
+- **解法**（三选一）:
+  1. **注入 SESSDATA cookie**（最有效）：
+     ```bash
+     # 方式 1：CLI 参数
+     python3 extract.py "https://b23.tv/xxx" --sessdata "你的SESSDATA值"
+     # 方式 2：环境变量（推荐 cron 场景）
+     export BILIBILI_SESSDATA="你的SESSDATA值"
+     export BILIBILI_BILI_JCT="bili_jct值"  # 可选
+     export BILIBILI_DEDEUSERID="你的UID"  # 可选
+     ```
+     获取方式：浏览器登录 B 站 → DevTools → Application → Cookies → 复制 `SESSDATA`/`bili_jct`/`DedeUserID` 字段值
+  2. **开启 wbi 签名**（无需登录，但有 1 次额外 nav 接口调用）:
+     ```bash
+     python3 extract.py "https://b23.tv/xxx" --wbi-sign on
+     ```
+  3. **降低频率 + 错峰**：cron 场景避免高峰期
+- **重试机制**：默认 3 次指数退避（1s/2s/4s），仅对 `BilibiliRiskControlError` 触发
+
 #### GitHub 仓库
 - 脚本已自动三级降级（gh CLI → REST API → defuddle）
 - `note` 含 "defuddle" → 用了 defuddle 提取

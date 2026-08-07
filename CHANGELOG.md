@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- **B站风控缓解**（issue #3）：
+  - 新增 `--sessdata` / `--bili-jct` / `--dedeuserid` CLI 参数 + `BILIBILI_SESSDATA` / `BILIBILI_BILI_JCT` / `BILIBILI_DEDEUSERID` 环境变量，注入 B站 Cookie 缓解风控。
+  - 新增 `--wbi-sign on` 开关，开启后自动给 view/player wbi v2/reply 接口加 wbi 签名（无需登录）。实现参考 [socialsisteryi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md)，含 1h mixin_key 缓存。
+  - 新增 `BilibiliRiskControlError` 异常类，风控响应（code ∈ {-101, -352, -412, -799, -509, -1200}）自动抛错。
+  - 新增 `tenacity` 重试：3 次指数退避（1s/2s/4s），仅对风控响应触发。
+  - `fetch_bili_video_info` / `fetch_bili_tags` / `fetch_bili_subtitle` / `fetch_bili_top_replies` 全部走新的 `_bili_get()` 包装器，自动带 Cookie + wbi 签名 + 重试 + 风控检测。
+  - 新增 `tests/test_bilibili_cookie_retry.py`：24 个单元测试覆盖 Cookie 注入 / 风控检测 / 重试 / wbi 签名 / 端到端集成。
+- **依赖**：`tenacity>=8.0` 加入 `requirements.txt`（推荐装，不装也能跑只是失去重试能力）。
+- **CI workflow**：新增 `timeout-minutes: 20` 防止单 job 卡死导致 matrix 撞 6h limit 取消。
+
 ### Changed
 - **SKILL.md 重写**：删除过期的 `~/.workbuddy/...`、`<skill_dir>/scripts/deps`、`<managed_python>` 等硬编码命令路径；新增「零配置快速上手」段落；精简 frontmatter `description`。
 - **defuddle 跨平台探测**：去掉 `~/.workbuddy/binaries/node/22.22.2/` 路径硬编码，按 `DEFUDDLE_BIN` 环境变量 → `PATH` 中的 defuddle → `PATH` 中的 npx → 自动 `npm i -g defuddle` 顺序探测。向后兼容旧的 workbuddy 布局作为 NODE_PATH 兜底。
