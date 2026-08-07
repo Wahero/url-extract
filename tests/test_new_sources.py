@@ -84,7 +84,7 @@ class TestYouTubeExtract:
         # 重置模块级状态
         extract._WBI_MIXIN_KEY_CACHE.update({'key': None, 'expires_at': 0})  # 兼容旧接口
 
-    @mock.patch('extract.requests.get')
+    @mock.patch('extract.requests.request')
     def test_extract_youtube_noembed_fallback(self, mock_get):
         """yt-dlp 不可用时(noembed 替代)能正常返回。"""
         # _run_ytdlp_dump_json 第一次调 ytdlp (没装好/timeout) → 返回 None
@@ -98,8 +98,8 @@ class TestYouTubeExtract:
         }
         mock_get.return_value = mock.Mock(json=lambda: noembed_resp, raise_for_status=lambda: None)
 
-        # 直接覆盖 _run_ytdlp_dump_json 返回 None
-        with mock.patch.object(extract, '_run_ytdlp_dump_json', return_value=None):
+        # 直接覆盖 _run_ytdlp_combined 返回 None（不调用 yt-dlp）
+        with mock.patch.object(extract, '_run_ytdlp_combined', return_value=None):
             r = extract.extract_youtube('https://youtu.be/atqcAb7MFAM')
         assert r['source'] == 'youtube'
         assert r['video_id'] == 'atqcAb7MFAM'
@@ -124,12 +124,15 @@ class TestYouTubeExtract:
             'duration': 600,
             'description': 'A real video description',
         }
-        with mock.patch.object(extract, '_run_ytdlp_dump_json', return_value=ytdlp_data):
-            with mock.patch.object(extract, '_run_ytdlp_subtitle', return_value={
+        # _run_ytdlp_combined 返回 {'data': ..., 'subtitle': ...} 格式
+        with mock.patch.object(extract, '_run_ytdlp_combined', return_value={
+            'data': ytdlp_data,
+            'subtitle': {
                 'available': True, 'lan': 'zh-Hant', 'text': 'line1\nline2',
                 'note': '字幕来自 yt-dlp (zh-Hant)',
-            }):
-                r = extract.extract_youtube('https://youtu.be/atqcAb7MFAM')
+            },
+        }):
+            r = extract.extract_youtube('https://youtu.be/atqcAb7MFAM')
         assert r['title'] == 'Real Video'
         assert r['author'] == 'Real Channel'
         assert r['view_count'] == 12345
@@ -150,7 +153,7 @@ class TestYouTubeExtract:
 # ============================================================
 
 class TestNoembed:
-    @mock.patch('extract.requests.get')
+    @mock.patch('extract.requests.request')
     def test_noembed_success(self, mock_get):
         mock_get.return_value = mock.Mock(
             json=lambda: {
@@ -162,7 +165,7 @@ class TestNoembed:
         assert r is not None
         assert r['title'] == 't'
 
-    @mock.patch('extract.requests.get')
+    @mock.patch('extract.requests.request')
     def test_noembed_error(self, mock_get):
         mock_get.return_value = mock.Mock(
             json=lambda: {'error': 'Not found'},
@@ -249,7 +252,7 @@ class TestXiaohongshuExtract:
         assert r['partial'] is True
         assert '登录态' in r['note']
 
-    @mock.patch('extract.requests.get')
+    @mock.patch('extract.requests.request')
     def test_extract_xhs_from_short_url(self, mock_get):
         """从 xhslink.cn 短链走重定向链找 item_id。"""
         # mock 3 跳重定向: xhslink.cn → xhs → wechat

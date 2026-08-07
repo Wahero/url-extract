@@ -65,10 +65,51 @@ CST = timezone(timedelta(hours=8))
 # 版本号（单一来源，与 pyproject.toml 保持同步）
 __version__ = '2.5.2'
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://www.bilibili.com/',
-}
+# 通用 UA（所有请求都用）
+_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+# 通用 headers（不含 Referer，给非 B站请求用，避免被跨源拒）
+BASE_HEADERS = {'User-Agent': _UA}
+
+# B站专用 headers（含 Referer，给 B站 API 用）
+HEADERS = {**BASE_HEADERS, 'Referer': 'https://www.bilibili.com/'}
+BILI_HEADERS = HEADERS  # 别名，更显式
+
+
+# 非 B站请求的统一重试包装（URLError/ConnectionError/Timeout 自动重试）
+_DEFAULT_RETRY = int(os.environ.get('EXTRACT_HTTP_RETRY', '2'))
+
+
+def safe_request(method: str, url: str, max_retries: int = _DEFAULT_RETRY, backoff: float = 1.0, **kwargs):
+    """带重试的 requests 调用。
+
+    重试策略：
+      - URLError / ConnectionError / Timeout → 自动重试（瞬时网络问题居多）
+      - HTTPError（4xx/5xx）→ 不重试（业务错误，重试无意义）
+      - 其它异常 → 透传
+
+    通过环境变量 EXTRACT_HTTP_RETRY 可调整重试次数（默认 2，共 3 次调用）。
+    """
+    import time as _time
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.request(method, url, **kwargs)
+            r.raise_for_status()
+            return r
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_exc = e
+            if attempt >= max_retries:
+                print(f"[retry] {method} {url} exhausted {max_retries} retries: {e}", file=sys.stderr)
+                raise
+            print(f"[retry] {method} {url} attempt {attempt}/{max_retries} failed: {e}", file=sys.stderr)
+            _time.sleep(backoff * attempt)
+        except requests.exceptions.HTTPError:
+            raise  # 4xx/5xx 不重试
+    # 不会到这里（最后一次失败 raise），但类型检查要 return
+    if last_exc:
+        raise last_exc
+    return None  # type: ignore
 
 # B站 Cookie 全局状态（可选，由 set_bili_cookies() 注入）
 # 用途：未登录 IP 容易被 B 站风控（-352/-412/-799/-101），
@@ -428,57 +469,90 @@ def _get_ytdlp_cmd():
     return _YTDLP_CACHE['cmd']
 
 
-def _run_ytdlp_dump_json(url: str, timeout: int = 12) -> dict | None:
-    """调 yt-dlp dump JSON。失败返回 None。
+def _run_ytdlp_combined(url: str, timeout: int = 60) -> dict | None:
+    """单次 yt-dlp 调用同时拿元数据和字幕。
 
-    用临时文件代替 PIPE,避免 yt-dlp 内部 spawn 子进程时 pipe 阻塞。
-    超时后 kill + 短 wait,不 hang 父进程。
+    优势：单进程 spawn，节省 3-5s 启动开销。
+    总超时 60s（之前 dump-json 12s + subtitle 90s = 102s）。
+
+    Returns:
+        dict: {'data': <元数据 dict>, 'subtitle': <字幕 dict|None>} 或 None
     """
     if not _get_ytdlp_cmd():
         return None
     import tempfile
     import shlex
     try:
-        cmd = shlex.split(_get_ytdlp_cmd()) + [
-            '--dump-json',
-            '--no-warnings',
-            '--no-playlist',
-            '--skip-download',
-            url,
-        ]
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as stdout_f:
-            stdout_path = stdout_f.name
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.log', delete=False) as stderr_f:
-            stderr_path = stderr_f.name
-        try:
-            with open(stdout_path, 'w') as out_f, open(stderr_path, 'w') as err_f:
-                proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, text=True)
-                try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+        with tempfile.TemporaryDirectory() as tmp:
+            out_template = os.path.join(tmp, '%(id)s.%(ext)s')
+            cmd = shlex.split(_get_ytdlp_cmd()) + [
+                '--dump-json',           # metadata → stdout
+                '--write-info-json',     # 也写 info.json 到 tmp（调试用）
+                '--write-auto-sub',      # 拿自动生成字幕
+                '--write-subs',          # 也拿手动上传字幕
+                '--sub-langs', 'zh-Hans,zh-Hant,zh-CN,zh-TW,en,en-US,en-GB',
+                '--sub-format', 'vtt',
+                '--no-warnings',
+                '--no-playlist',
+                '--skip-download',
+                '-o', out_template,
+                url,
+            ]
+            # stdout/stderr 用临时文件，避免 PIPE 阻塞
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as stdout_f:
+                stdout_path = stdout_f.name
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.log', delete=False) as stderr_f:
+                stderr_path = stderr_f.name
+            try:
+                with open(stdout_path, 'w') as out_f, open(stderr_path, 'w') as err_f:
+                    proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, text=True)
                     try:
-                        proc.wait(timeout=1)
+                        proc.wait(timeout=timeout)
                     except subprocess.TimeoutExpired:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        print(f'[yt-dlp] combined 超时 ({timeout}s)', file=sys.stderr)
+                        return None
+                with open(stdout_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    stdout = f.read()
+                with open(stderr_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    stderr = f.read()
+            finally:
+                for tp in [stdout_path, stderr_path]:
+                    try:
+                        os.unlink(tp)
+                    except OSError:
                         pass
-                    print(f'[yt-dlp] dump-json 超时 ({timeout}s)', file=sys.stderr)
-                    return None
-            with open(stdout_path, 'r', encoding='utf-8', errors='ignore') as f:
-                stdout = f.read()
-            with open(stderr_path, 'r', encoding='utf-8', errors='ignore') as f:
-                stderr = f.read()
-        finally:
-            for tp in [stdout_path, stderr_path]:
-                try:
-                    os.unlink(tp)
-                except OSError:
-                    pass
-        if proc.returncode != 0:
-            print(f'[yt-dlp] dump-json 失败 rc={proc.returncode}: {stderr[:200]}', file=sys.stderr)
-            return None
-        return json.loads(stdout)
+            if proc.returncode != 0:
+                print(f'[yt-dlp] combined 失败 rc={proc.returncode}: {stderr[:200]}', file=sys.stderr)
+                return None
+            try:
+                data = json.loads(stdout)
+            except json.JSONDecodeError as e:
+                print(f'[yt-dlp] JSON 解析失败: {e}', file=sys.stderr)
+                return None
+
+            # 在 tmp 里找 vtt 文件
+            subtitle = None
+            try:
+                vtt_files = [f for f in os.listdir(tmp) if f.endswith('.vtt')]
+                if vtt_files:
+                    vtt_path = os.path.join(tmp, vtt_files[0])
+                    with open(vtt_path, 'r', encoding='utf-8', errors='ignore') as vf:
+                        vtt_content = vf.read()
+                    parts = vtt_files[0].rsplit('.', 2)
+                    lan = parts[1] if len(parts) >= 2 else 'unknown'
+                    text = _parse_vtt_to_text(vtt_content)
+                    if text:
+                        subtitle = {'lan': lan, 'text': text}
+            except Exception as e:
+                print(f'[yt-dlp] 字幕解析失败: {e}', file=sys.stderr)
+            return {'data': data, 'subtitle': subtitle}
     except Exception as e:
-        print(f'[yt-dlp] dump-json 异常: {e}', file=sys.stderr)
+        print(f'[yt-dlp] combined 异常: {e}', file=sys.stderr)
         return None
 
 
@@ -511,66 +585,18 @@ def _parse_vtt_to_text(vtt_content: str) -> str:
     return '\n'.join(out)
 
 
-def _run_ytdlp_subtitle(url: str, workdir: str = None, timeout: int = 90) -> dict | None:
-    """用 yt-dlp 拿字幕（仅下载字幕文件，不下视频）。
-    
-    优先 zh-Hans > zh-Hant > en。返回 {'lan': 'zh-Hans', 'text': '...'} 或 None。
-    """
-    if not _get_ytdlp_cmd():
-        return None
-    try:
-        import shlex
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            cmd = shlex.split(_get_ytdlp_cmd()) + [
-                '--write-auto-sub',  # 拿自动生成字幕
-                '--write-subs',  # 也拿手动上传字幕
-                '--sub-langs', 'zh-Hans,zh-Hant,zh-CN,zh-TW,en,en-US,en-GB',
-                '--sub-format', 'vtt',
-                '--skip-download',
-                '--no-warnings',
-                '--no-playlist',
-                '-o', os.path.join(tmp, '%(id)s.%(ext)s'),
-                url,
-            ]
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout,
-            )
-            # 找到下载的 vtt 文件
-            for f in os.listdir(tmp):
-                if not f.endswith('.vtt'):
-                    continue
-                full = os.path.join(tmp, f)
-                with open(full, 'r', encoding='utf-8', errors='ignore') as fp:
-                    vtt = fp.read()
-                text = _parse_vtt_to_text(vtt)
-                if not text.strip():
-                    continue
-                # 推断语言（从文件名 like <id>.zh-Hans.vtt）
-                lan = 'unknown'
-                for part in f.split('.'):
-                    if part in ('zh-Hans', 'zh-Hant', 'zh-CN', 'zh-TW', 'en', 'en-US', 'en-GB'):
-                        lan = part
-                        break
-                return {'lan': lan, 'text': text, 'available': True, 'note': f'字幕来自 yt-dlp（{lan}）'}
-            return {'available': False, 'note': 'yt-dlp 未找到任何 vtt 字幕文件（视频可能无字幕）'}
-    except Exception as e:
-        return {'available': False, 'note': f'yt-dlp 字幕下载异常: {e}'}
-
-
 def fetch_youtube_noembed(url: str) -> dict | None:
     """noembed.com 公开代理拿 YouTube 基础元数据（无 yt-dlp 时的降级路径）。
     
     返回 {'title', 'author_name', 'author_url', 'thumbnail_url', 'provider_name'} 或 None。
     """
     try:
-        r = requests.get(
-            'https://noembed.com/embed',
+        r = safe_request(
+            'GET', 'https://noembed.com/embed',
             params={'url': url},
             headers={'User-Agent': 'Mozilla/5.0 (compatible; url-extract/2.6)'},
             timeout=15,
         )
-        r.raise_for_status()
         d = r.json()
         if 'error' in d:
             return None
@@ -1090,8 +1116,10 @@ def extract_youtube(link: str) -> dict:
     description = ''
     source_note = ''
 
-    # 路径 A: yt-dlp dump-json
-    ytdlp_data = _run_ytdlp_dump_json(link)
+    # 路径 A: yt-dlp 合并调用（单进程同时拿元数据 + 字幕）
+    combined = _run_ytdlp_combined(link)
+    ytdlp_data = combined['data'] if combined else None
+    subtitle_from_yt = combined['subtitle'] if combined else None
     ytdlp_available = bool(ytdlp_data)
     if ytdlp_data:
         title = ytdlp_data.get('title', '') or title
@@ -1103,7 +1131,7 @@ def extract_youtube(link: str) -> dict:
         like_count = ytdlp_data.get('like_count', 0) or 0
         duration_sec = ytdlp_data.get('duration', 0) or 0
         description = ytdlp_data.get('description', '') or description
-        source_note = '数据来源：yt-dlp (--dump-json)'
+        source_note = '数据来源：yt-dlp (--dump-json + --write-auto-sub 合并调用)'
     else:
         # 路径 B: noembed 降级
         noembed_data = fetch_youtube_noembed(link)
@@ -1120,13 +1148,14 @@ def extract_youtube(link: str) -> dict:
                 'note': '请检查网络或安装 yt-dlp（pip install yt-dlp）',
             }
 
-    # 字幕（仅 yt-dlp 路径才尝试，因为 noembed 不提供字幕）
-    # 如果 yt-dlp dump-json 都失败了，字幕也大概率不可用，直接跳过节省 90s
-    subtitle = {'available': False, 'note': '未尝试获取字幕'}
-    if ytdlp_available:
-        sub = _run_ytdlp_subtitle(link)
-        if sub:
-            subtitle = sub
+    # 字幕（仅 yt-dlp 路径才有，noembed 不提供字幕）
+    # _run_ytdlp_combined 已经在同一次进程内拿字幕了，不需要再次调用
+    if subtitle_from_yt:
+        subtitle = subtitle_from_yt
+    elif ytdlp_available:
+        subtitle = {'available': False, 'note': 'yt-dlp 抽取成功但未发现字幕轨道'}
+    else:
+        subtitle = {'available': False, 'note': '未尝试获取字幕（noembed 路径无字幕）'}
 
     return {
         'source': 'youtube',
@@ -1195,8 +1224,8 @@ def resolve_xhs_url(link: str) -> dict:
     else:
         # 2) 短链：xhslink.cn/o/xxx → 重定向链 → 找 xhs URL
         try:
-            r = requests.get(
-                link,
+            r = safe_request(
+                'GET', link,
                 headers={'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42(0x18002a2f) NetType/WIFI Language/zh_CN'},
                 allow_redirects=True,
                 timeout=10,
@@ -1372,7 +1401,8 @@ def extract_webpage(link: str) -> dict:
     # defuddle 失败 → 降级到 requests+正则（仅提取 meta）
     print("WARN: defuddle 提取失败，降级到 requests meta 提取", file=sys.stderr)
     try:
-        r = requests.get(link, headers=HEADERS, allow_redirects=True, timeout=15)
+        # 通用网页请求用 BASE_HEADERS（不带 B站 Referer，避免被跨源拒）
+        r = safe_request('GET', link, headers=BASE_HEADERS, allow_redirects=True, timeout=15)
         html = r.text
 
         title = ''
