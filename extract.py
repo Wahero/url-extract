@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-通用内容抽取脚本 v2.5.1
+通用内容抽取脚本 v2.5.2
 支持来源：B站视频、GitHub仓库、一般网页URL、腾讯微视视频（降级方案）
 增强：抽取后自动导入 IMA 知识库，支持上传 Markdown 精华文档到「RAW」个人知识库
 
@@ -55,19 +55,16 @@ except ImportError:
     def wait_exponential(**_): return None
     def retry_if_exception_type(_): return None
 
-try:
-    import requests
-except ImportError:
-    print("ERROR: 缺少 requests 库，请运行: pip install -r requirements.txt", file=sys.stderr)
-    sys.exit(1)
-
-try:
-    import jinja2
-except ImportError:
-    print("ERROR: 缺少 jinja2 库，请运行: pip install jinja2", file=sys.stderr)
-    sys.exit(1)
+# 必要的核心依赖：直接 import 让 ImportError 自然抛出。
+# 库使用者可以 try/except ImportError 捕获，应用使用者也会看到清晰的错误。
+import requests
+import jinja2
 
 CST = timezone(timedelta(hours=8))
+
+# 版本号（单一来源，与 pyproject.toml 保持同步）
+__version__ = '2.5.2'
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://www.bilibili.com/',
@@ -356,7 +353,18 @@ def _find_local_node_modules() -> str | None:
     return None
 
 
-_DEFUDDLE_CMD, _DEFUDDLE_SHELL, _DEFUDDLE_CWD = _resolve_defuddle()
+# Lazy init：首次调用时再解析（避免 import 触发 npm install / pip install）
+_DEFUDDLE_CACHE = {}
+
+
+def _get_defuddle_cmd():
+    """获取 defuddle CLI 路径（首次调用时解析并缓存）。"""
+    if 'cmd' not in _DEFUDDLE_CACHE:
+        cmd, shell, cwd = _resolve_defuddle()
+        _DEFUDDLE_CACHE['cmd'] = cmd
+        _DEFUDDLE_CACHE['shell'] = shell
+        _DEFUDDLE_CACHE['cwd'] = cwd
+    return _DEFUDDLE_CACHE['cmd'], _DEFUDDLE_CACHE['shell'], _DEFUDDLE_CACHE['cwd']
 
 # ============================================================
 # yt-dlp CLI 集成（跨平台自动探测，YouTube 视频抽取）
@@ -409,7 +417,15 @@ def _resolve_ytdlp() -> str:
     return ''
 
 
-_YTDLP_CMD = _resolve_ytdlp()
+# Lazy init：首次调用时再解析
+_YTDLP_CACHE = {}
+
+
+def _get_ytdlp_cmd():
+    """获取 yt-dlp CLI 路径（首次调用时解析并缓存）。"""
+    if 'cmd' not in _YTDLP_CACHE:
+        _YTDLP_CACHE['cmd'] = _resolve_ytdlp()
+    return _YTDLP_CACHE['cmd']
 
 
 def _run_ytdlp_dump_json(url: str, timeout: int = 12) -> dict | None:
@@ -418,12 +434,12 @@ def _run_ytdlp_dump_json(url: str, timeout: int = 12) -> dict | None:
     用临时文件代替 PIPE,避免 yt-dlp 内部 spawn 子进程时 pipe 阻塞。
     超时后 kill + 短 wait,不 hang 父进程。
     """
-    if not _YTDLP_CMD:
+    if not _get_ytdlp_cmd():
         return None
     import tempfile
     import shlex
     try:
-        cmd = shlex.split(_YTDLP_CMD) + [
+        cmd = shlex.split(_get_ytdlp_cmd()) + [
             '--dump-json',
             '--no-warnings',
             '--no-playlist',
@@ -489,7 +505,7 @@ def _parse_vtt_to_text(vtt_content: str) -> str:
         if in_cue:
             # 去除 <c.classname>...</c> 等样式标签
             import re as _re
-            clean = _re.sub(r'<[^>]+>', '', s)
+            clean = re.sub(r'<[^>]+>', '', s)
             if clean and (not out or out[-1] != clean):  # 简单去重
                 out.append(clean)
     return '\n'.join(out)
@@ -500,13 +516,13 @@ def _run_ytdlp_subtitle(url: str, workdir: str = None, timeout: int = 90) -> dic
     
     优先 zh-Hans > zh-Hant > en。返回 {'lan': 'zh-Hans', 'text': '...'} 或 None。
     """
-    if not _YTDLP_CMD:
+    if not _get_ytdlp_cmd():
         return None
     try:
         import shlex
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            cmd = shlex.split(_YTDLP_CMD) + [
+            cmd = shlex.split(_get_ytdlp_cmd()) + [
                 '--write-auto-sub',  # 拿自动生成字幕
                 '--write-subs',  # 也拿手动上传字幕
                 '--sub-langs', 'zh-Hans,zh-Hant,zh-CN,zh-TW,en,en-US,en-GB',
@@ -576,7 +592,7 @@ def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
     Returns:
         dict (format='json') 或 str (format='markdown')，失败返回 None
     """
-    if not _DEFUDDLE_CMD:
+    if not _get_defuddle_cmd()[0]:
         print(
             'WARN: defuddle 不可用（未安装且 auto-install 关闭）。'
             '安装方式: npm i -g defuddle',
@@ -585,11 +601,11 @@ def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
         return None
 
     # 决定调用方式：npx defuddle / 直接 defuddle / 绝对路径
-    cmd_basename = os.path.basename(_DEFUDDLE_CMD).lower()
+    cmd_basename = os.path.basename(_get_defuddle_cmd()[0]).lower()
     if cmd_basename == 'npx' or cmd_basename == 'npx.cmd':
-        cmd_args = [_DEFUDDLE_CMD, 'defuddle', 'parse', url]
+        cmd_args = [_get_defuddle_cmd()[0], 'defuddle', 'parse', url]
     else:
-        cmd_args = [_DEFUDDLE_CMD, 'parse', url]
+        cmd_args = [_get_defuddle_cmd()[0], 'parse', url]
 
     if format == 'json':
         cmd_args.append('--json')
@@ -637,6 +653,47 @@ def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
 
 
 # ============================================================
+# URL 验证（防 SSRF + 协议白名单）
+# ============================================================
+
+# 禁止访问的地址（防止 SSRF 攻击云元数据 / 内网）
+_BLOCKED_HOSTS = {
+    '127.0.0.1', 'localhost', '0.0.0.0',
+    '169.254.169.254',  # AWS / GCP / Azure 云元数据服务
+    '::1', '[::1]',
+    'metadata.google.internal',  # GCP
+}
+_ALLOWED_SCHEMES = {'http', 'https'}
+
+
+class URLError(Exception):
+    """URL 解析/验证失败。"""
+    pass
+
+
+def validate_url(url: str) -> str:
+    """验证 URL 的协议和主机名，返回原 URL。
+
+    规则：
+      - 协议必须是 http/https（拒绝 file://、ftp:// 等）
+      - 主机名必须存在
+      - 主机名不能在 _BLOCKED_HOSTS 名单中（防 SSRF）
+
+    Raises:
+        URLError: URL 不合法时
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise URLError(f"不支持的协议: {parsed.scheme} (仅支持 http/https)")
+    if not parsed.hostname:
+        raise URLError(f"URL 缺少主机名: {url}")
+    if parsed.hostname.lower() in _BLOCKED_HOSTS:
+        raise URLError(f"禁止访问的地址: {parsed.hostname}")
+    return url
+
+
+# ============================================================
 # 来源检测
 # ============================================================
 
@@ -665,12 +722,27 @@ def detect_source(link: str) -> str:
 # ============================================================
 
 def extract_bilibili(link: str) -> dict:
-    """B站视频完整抽取。"""
+    """B站视频完整抽取。
+
+    性能优化：tags / subtitle / replies 三个独立请求并行执行（ThreadPoolExecutor）。
+    - 串行: 3×平均响应时间 = ~1.5-3s
+    - 并行: max(3个响应时间) = ~0.5-1s
+    """
+    from concurrent.futures import ThreadPoolExecutor
     bvid = resolve_bvid(link)
     info = fetch_bili_video_info(bvid)
-    tags = fetch_bili_tags(bvid)
-    subtitle = fetch_bili_subtitle(bvid, info.get('cid'))
-    replies = fetch_bili_top_replies(info.get('aid'))
+    aid = info.get('aid')
+    cid = info.get('cid')
+
+    # 三个独立请求并行（subtitle 需要 cid, replies 需要 aid, tags 只要 bvid）
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_tags = pool.submit(fetch_bili_tags, bvid)
+        f_subtitle = pool.submit(fetch_bili_subtitle, bvid, cid)
+        f_replies = pool.submit(fetch_bili_top_replies, aid)
+        tags = f_tags.result()
+        subtitle = f_subtitle.result()
+        replies = f_replies.result()
+
     stat = info.get('stat', {})
 
     return {
@@ -711,8 +783,7 @@ def resolve_bvid(link_or_bvid: str) -> str:
         m = re.search(r'(BV[0-9A-Za-z]{10})', r.url)
         if m:
             return m.group(1)
-    print(f"ERROR: 无法解析BV号: {s}", file=sys.stderr)
-    sys.exit(1)
+    raise URLError(f"无法解析BV号: {s}")
 
 def fetch_bili_video_info(bvid: str) -> dict:
     """获取B站视频基本信息。失败时抛 BilibiliRiskControlError 或其它异常。"""
@@ -915,8 +986,7 @@ def parse_repo(url: str) -> dict:
     m = re.search(r'github\.com/([^/]+)/([^/?#]+)', url)
     if m:
         return {'owner': m.group(1), 'repo': m.group(2).rstrip('.git')}
-    print("ERROR: 无法解析GitHub仓库地址", file=sys.stderr)
-    sys.exit(1)
+    raise URLError(f"无法解析GitHub仓库地址: {url}")
 
 # ============================================================
 # 腾讯微视 抽取
@@ -1104,19 +1174,16 @@ def resolve_xhs_url(link: str) -> dict:
     kind = 'unknown'
     canonical_url = link
 
-    import re as _re
-    import urllib.parse as _up
-
     def _extract_from_url(u: str):
         """从单个 URL 提取 (item_id, kind)，找到就返回 (id, kind) 否则 (None, None)。"""
         if not u:
             return None, None
-        m = _re.search(r'/(?:discovery|exploration)/item/([0-9a-f]{20,32})', u, _re.I)
+        m = re.search(r'/(?:discovery|exploration)/item/([0-9a-f]{20,32})', u, re.I)
         if not m:
             return None, None
         iid = m.group(1)
         kind = 'unknown'
-        m2 = _re.search(r'[?&]type=(\w+)', u)
+        m2 = re.search(r'[?&]type=(\w+)', u)
         if m2:
             kind = m2.group(1)
         return iid, kind
@@ -1143,10 +1210,10 @@ def resolve_xhs_url(link: str) -> dict:
             for u in all_urls:
                 # 处理 wechat 中转 URL：从 query string 的 redirect_uri 解码后再试
                 if 'weixin.qq.com' in u and 'redirect_uri=' in u:
-                    parsed = _up.urlparse(u)
-                    qs = _up.parse_qs(parsed.query)
+                    parsed = urllib.parse.urlparse(u)
+                    qs = urllib.parse.parse_qs(parsed.query)
                     if 'redirect_uri' in qs:
-                        decoded = _up.unquote(qs['redirect_uri'][0])
+                        decoded = urllib.parse.unquote(qs['redirect_uri'][0])
                         iid2, kind2 = _extract_from_url(decoded)
                         if iid2:
                             item_id, kind = iid2, kind2 or kind
@@ -1373,20 +1440,25 @@ def extract(link: str) -> dict:
     else:
         return extract_webpage(link)
 
-def _load_ima_client():
-    """动态加载 ima_client 模块。"""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "ima_client", os.path.join(os.path.dirname(__file__), "ima_client.py")
-    )
-    ima = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ima)
-    return ima
+_IMA_CLIENT = None
+
+
+def _get_ima_client():
+    """获取 ima_client 模块（首次调用时加载并缓存）。
+
+    直接 import ima_client（同目录），避免 importlib.util 动态加载绕开 Python 模块系统。
+    之前用 importlib.util.spec_from_file_location 每次都重新 exec_module，慢且无法 mock。
+    """
+    global _IMA_CLIENT
+    if _IMA_CLIENT is None:
+        import ima_client
+        _IMA_CLIENT = ima_client
+    return _IMA_CLIENT
 
 
 def _upload_to_ima(data: dict, kb_name: str, source_url: str):
     """将抽取结果作为 URL 导入 IMA 知识库。"""
-    ima = _load_ima_client()
+    ima = _get_ima_client()
 
     # 查找目标知识库
     print(f"[IMA] 正在查找知识库「{kb_name}」...", file=sys.stderr)
@@ -1429,7 +1501,7 @@ def _build_context_for_source(data: dict) -> dict:
         'source': source,
         'title': title,
         'url': data.get('url', ''),
-        'version': data.get('version', '2.5.2'),
+        'version': data.get('version', __version__),
         'owner': data.get('owner', {}) or {},
         'bvid': data.get('bvid', ''),
         'pubdate': data.get('pubdate', ''),
@@ -1523,7 +1595,7 @@ def _upload_to_ima_raw(data: dict, source_url: str, external_md_path: str = ""):
     v2.5 新增：若 external_md_path 指定了外部 Markdown 文件，优先上传该文件内容
     （用于 agent 生成的高质量精华文档），否则使用脚本自动生成的 Markdown。
     """
-    ima = _load_ima_client()
+    ima = _get_ima_client()
     kb_name = "RAW"
     title = data.get("title", "") or data.get("full_name", "")
 
@@ -1585,7 +1657,7 @@ def _upload_to_ima_raw(data: dict, source_url: str, external_md_path: str = ""):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='通用内容精华抽取 v2.5.1 (defuddle + IMA 集成)')
+    parser = argparse.ArgumentParser(description=f'通用内容精华抽取 v{__version__} (defuddle + IMA 集成)')
     parser.add_argument('link', help='链接（B站/GitHub/网页/微视）')
     parser.add_argument('--output', '-o', default='extract_result.json', help='输出JSON路径')
     parser.add_argument('--upload-ima', action='store_true', help='抽取后导入 URL 到 IMA 知识库')
@@ -1605,9 +1677,29 @@ def main():
     if args.wbi_sign == 'on':
         set_wbi_enabled(True)
 
-    data = extract(args.link)
+    # 1) 验证 URL（防 SSRF）
+    # 2) 捕获 URLError（URL 解析失败）和其它异常
+    try:
+        validate_url(args.link)
+    except URLError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        data = extract(args.link)
+    except URLError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as e:
+        # 其它未捕获异常：打印堆栈 + 退出码 1
+        import traceback
+        print(f"ERROR: 抽取失败 ({type(e).__name__}): {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
     data['extracted_at'] = datetime.now(tz=CST).strftime('%Y-%m-%d %H:%M:%S')
-    data['version'] = '2.5.1'
+    data['version'] = __version__
 
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
