@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **ima_client.py COS SDK 上传修复**：移除 `ContentLength` 参数（int 触发 `http.client` 报错），改用 `ETag` 判定上传成功（SDK 成功返回 dict 含 `ETag`，失败抛 `CosServiceError`）。（#15）
+
 ### Added
 - **新来源支持：YouTube / 小红书 / 抖音**（issue #4）：
   - **YouTube**：检测 `youtube.com/watch?v=` / `youtu.be/`，优先 yt-dlp (--dump-json + --write-auto-sub) 拿完整元数据 + 字幕，无 yt-dlp 时降级到 noembed.com 公开代理（仅 title/author/thumbnail）。含轻量 WebVTT parser。
