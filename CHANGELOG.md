@@ -33,6 +33,52 @@
 - `_SOURCE_PREFIX` 常量集中维护输出文件名前缀。
 - `tests/test_templates.py` + `tests/fixtures/*.json`：10 个单元测试覆盖所有来源分支。
 
+- **CI workflow**：新增 `timeout-minutes: 20` 防止单 job 卡死导致 matrix 撞 6h limit 取消。
+
+### Changed (PR #10)
+- **CI workflow 安装依赖**：`Install dependencies` 步骤显式装 `tenacity`（之前是 requirements.txt 注释，runner 实际没装），并设置 `timeout-minutes: 20` 防单 job 卡死。
+
+### Added (PR #11, issue #5)
+- **ima_client.py v1.4：tenacity 重试**：
+  - `api_call()` 用 tenacity `@retry` 装饰，3 次指数退避（1s/2s/4s，最多 10s）
+  - 只对 `URLError` / `HTTP 5xx` 重试；HTTP 4xx / 业务 code != 0 → 抛 `ImaAPIBusinessError` 不重试
+  - 通过环境变量 `IMA_API_RETRY`（默认 3）/ `IMA_API_BACKOFF`（默认 1）可调
+  - 新增自定义异常：`ImaAPIRetryableError`（可重试）/ `ImaAPIBusinessError`（不可重试）
+  - no-op fallback：tenacity 未装时装饰器是 pass-through
+- **ima_client.py 全函数类型注解**：所有公开函数加 type hint（`tuple[str, str]` / `list[dict[str, Any]]` 等）
+- **22 个新测试**：`tests/test_ima_retry.py` 覆盖 `_is_retryable` 14 个 + `api_call` 集成 5 个 + 辅助 3 个
+- **修 bug**：`HTTPError` 是 `URLError` 子类，`_is_retryable` 检查顺序必须 HTTPError 先于 URLError
+
+### Changed (PR #12, extract.py Phase 1 重构)
+- **C3 模块级副作用移除（lazy init）**：删除模块级 `_DEFUDDLE_CMD = _resolve_defuddle()` / `_YTDLP_CMD = _resolve_ytdlp()`（之前 import 触发 npm install / pip install 30-180s）。改用 `_DEFUDDLE_CACHE` / `_YTDLP_CACHE` 首次调用时再解析。**`import extract` 从 30-180s 缩到 0.1s**
+- **C2 `sys.exit(1)` → 异常**：`resolve_bvid` / `parse_repo` 失败 → 抛 `URLError` 而非 `sys.exit(1)`；`import requests` / `import jinja2` 直接 ImportError 自然抛出。`main()` 加 try/except URLError，库使用者可 try/except 捕获
+- **C9 `_load_ima_client` 简化**：删除 `importlib.util.spec_from_file_location` 动态加载，改用模块级 `_IMA_CLIENT` + `_get_ima_client()`（首次调用 import + 缓存）
+- **C6 版本号统一**：提取 `__version__ = '2.5.2'` 单一来源（与 pyproject.toml 同步），argparse / data / 默认值都引用
+- **S2 URL 验证（防 SSRF）**：新增 `validate_url()`，白名单 http/https，黑名单 `localhost` / `127.0.0.1` / `169.254.169.254` / `metadata.google.internal`
+- **E1 B站 3 API 并行化**：`extract_bilibili()` 用 `ThreadPoolExecutor(max_workers=3)` 并行 `tags` / `subtitle` / `replies` 三个独立请求（`video_info` 必须先做），串行 ~2-3s → 并行 ~0.5-1s
+- **C8 重复 import 清理**：删除 `resolve_xhs_url()` 内 `import re as _re` / `import urllib.parse as _up`，全文替换为模块顶部 import
+
+### Changed (PR #13, extract.py Phase 2 重构)
+- **T3 HEADERS 拆分（防跨源 Referer 污染）**：拆 `BASE_HEADERS = {UA}` / `HEADERS (BILI_HEADERS) = {UA, Referer=B站}`。defuddle 降级路径改用 `BASE_HEADERS`（不带 B站 Referer，避免被跨源拒）
+- **E4 非 B站路径加重试**：新增 `safe_request(method, url, max_retries=2, backoff=1.0, **kwargs)`，ConnectionError/Timeout 自动重试，HTTPError 不重试。环境变量 `EXTRACT_HTTP_RETRY` 可调。应用：fetch_youtube_noembed / resolve_xhs_url / defuddle fallback
+- **E2 YouTube 合并 yt-dlp 调用**：用 `_run_ytdlp_combined` 单进程拿 metadata + 字幕（命令：`--dump-json --write-info-json --write-auto-sub --write-subs`），替代之前的 `_run_ytdlp_dump_json` + `_run_ytdlp_subtitle`。节省 3-5s 启动开销，总超时 102s → 60s
+- **D1 删 main 分支**：删除 GitHub 上 1b944518 (v2.5) 的 main 分支（与 master 不同步，且非默认分支）
+
+### Fixed (PR #15, _cos_upload_sdk 两个 bug 修复)
+- **Bug 1 (ContentLength)**：旧代码传 int `ContentLength=file_size` 在某些 Python/SDK 版本下触发 http.client 报错。修复：不传 ContentLength，让 SDK 从 Body 自动计算
+- **Bug 2 (SDK 返回判断错误, critical)**：cos-sdk-v5 成功返回的是 dict（含 ETag），不是带 status_code 属性的对象。旧代码 `getattr(response, "status_code", None) or response.get("status_code")` 永远返回 None，导致 **所有 --ima-raw 走 SDK 路径之前都误判失败**。修复：用 `response.get("ETag")` 判定成功
+- 影响范围：自 PR #2 引入，所有 --ima-raw 走 SDK 路径之前都是 bug 状态
+
+### Added (PR #12-15 测试)
+- 17 个新测试（`tests/test_url_validation.py`）覆盖 validate_url 9 个 + 异常化 2 个 + lazy init 2 个 + 版本号 2 个 + ima cache 1 个 + 异常捕获 1 个
+- 12 个新测试（`tests/test_refactor_13.py`）覆盖 HEADERS 3 个 + safe_request 5 个 + _run_ytdlp_combined 2 个 + defuddle fallback 1 个 + import 1 个
+- 6 个新测试（`tests/test_cos_sdk_etag.py`）覆盖 ContentLength 1 个 + ETag 判定 5 个
+- 新增 `tests/conftest.py`：autouse fixture 清理 extract 缓存（解决 lazy init 引入的 test 隔离问题）
+- **总测试数 73 → 130，新增 57 个**
+
+### Added (PR #14, docs)
+- 新增 `REFACTOR_PROGRESS.md`：记录 2026-08-07 一天完成的 url-extract 重构工作（6 个 PR 详情 + 5 个技术亮点 + 报告进度 + 反思）
+
 ## [2.5.1] - 2026-08-04
 - 修复 `--ima-raw` 在 B 站无字幕时仍上传空壳 Markdown 的 bug，增加安全守卫。
 
