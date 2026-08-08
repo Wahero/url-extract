@@ -375,15 +375,24 @@ def _cos_upload_sdk(
     )
     client = CosS3Client(config)
 
+    # Bug 修复 (2026-08-08):
+    #   - ContentLength 不传：传 int 会在某些 Python/SDK 版本下触发 http.client 报错；
+    #     SDK 内部能从 Body 自动计算 ContentLength。
+    #   - 成功判断用 ETag：cos-sdk-v5 成功返回的是 dict（含 ETag），不是带 status_code
+    #     属性的对象；之前用 status_code 判定会永远返回 False（实际上传成功被判失败）。
     response = client.put_object(
         Bucket=bucket,
         Key=cos_key,
         Body=file_data,
         ContentType=content_type,
-        ContentLength=file_size,
     )
-    status = getattr(response, "status_code", None) or response.get("status_code")
-    return status in (200, 204)
+    # SDK 成功：dict 含 ETag
+    # SDK 失败：通常抛异常（CosClientError / CosServiceError），但边缘情况可能返回
+    # dict 不含 ETag（如 AccessDenied / SignatureDoesNotMatch 错误）
+    if not isinstance(response, dict):
+        return False
+    etag = response.get("ETag")
+    return bool(etag)
 
 
 def _cos_upload_legacy_v1(
