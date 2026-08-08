@@ -1,12 +1,12 @@
 ---
 name: url-extract
-description: 把链接（B站视频 / GitHub 仓库 / 一般网页 / 腾讯微视）变成结构化 Markdown 精华文档，可选上传到 IMA 知识库。触发词：精华、总结、提取、生成精华、B站精华、GitHub总结、网页精华。
+description: 把链接（B站视频 / YouTube / 小红书 / 抖音 / GitHub 仓库 / 一般网页 / 腾讯微视）变成结构化 Markdown 精华文档，可选上传到 IMA 知识库。触发词：精华、总结、提取、生成精华、B站精华、YouTube摘要、GitHub总结、小红书精华、抖音精华、网页精华。
 allowed-tools: Read, Write, Bash, WebSearch
 ---
 
 # URL Extract — 通用内容精华抽取
 
-把任何链接变成一篇干净、结构化的 Markdown 精华文档。支持：B 站视频、GitHub 仓库、一般网页、腾讯微视。**`--ima-raw` 上传完整 Markdown 到 IMA「RAW」知识库；`--ima-raw-md` 支持外部 Markdown 文件优先上传。**
+把任何链接变成一篇干净、结构化的 Markdown 精华文档。**支持 7 种来源**：B 站视频、YouTube、小红书、抖音、GitHub 仓库、一般网页、腾讯微视。**`--ima-raw` 上传完整 Markdown 到 IMA「RAW」知识库；`--ima-raw-md` 支持外部 Markdown 文件优先上传。**
 
 > ⚠️ **学术测试版（Academic Preview）** — 当视频无字幕时，部分要点来自社区资料整合而非视频原声。正式参考请对照原始视频核实。
 
@@ -14,8 +14,8 @@ allowed-tools: Read, Write, Bash, WebSearch
 
 ```bash
 # 1. 安装依赖
-pip install -r requirements.txt        # Python
-npm i -g defuddle                      # 可选：自动安装也可
+pip install -r requirements.txt        # Python（含 tenacity 重试）
+npm i -g defuddle                      # 可选：自动探测也可
 
 # 2. 抽取任意链接 → 输出 JSON
 python3 extract.py "https://b23.tv/xxx" --output result.json
@@ -24,19 +24,22 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 export IMA_OPENAPI_CLIENTID="你的ClientID"
 export IMA_OPENAPI_APIKEY="你的APIKey"
 python3 extract.py "https://b23.tv/xxx" --output result.json --ima-raw
+
+# 4. B 站风控缓解（生产环境推荐）
+python3 extract.py "https://b23.tv/xxx" --sessdata "你的SESSDATA" --wbi-sign on
 ```
 
 ## 支持来源
 
 | 来源 | 检测规则 | 抽取方式 |
 |---|---|---|
-| **B站视频** | `bilibili.com` / `b23.tv` / `BV号` | 公共 API（视频信息/标签/字幕/评论） |
+| **B站视频** | `bilibili.com` / `b23.tv` / `BV号` | 公共 API（视频信息/标签/字幕/评论）；SESSDATA cookie + wbi 签名 + tenacity 风控重试 |
 | **YouTube 视频** | `youtube.com/watch?v=` / `youtu.be/` | yt-dlp dump-json + 字幕（推荐装 yt-dlp），无 yt-dlp 时降级到 noembed.com 公开代理 |
 | **小红书笔记** | `xiaohongshu.com/discovery/item/` / `xhslink.com` / `xhslink.cn` | 重定向链解析 item_id（无登录态拿不到内容，强提示 WebSearch 补充） |
 | **抖音视频** | `douyin.com/video/` / `v.douyin.com` / `iesdouyin.com` | 长链直接解析 video_id（无签名拿不到内容，强提示 WebSearch 补充） |
 | **GitHub 仓库** | `github.com` | gh CLI → REST API → defuddle 三级降级 |
 | **腾讯微视** | `weishi.qq.com` / 微信插件链接 | 微信 UA 模拟 + WebSearch 补充 |
-| **一般网页** | 以上都不是 | defuddle CLI 一步提取 |
+| **一般网页** | 以上都不是 | defuddle CLI 一步提取（无 defuddle 时降级到 requests meta 提取） |
 
 ## 工作流程
 
@@ -68,7 +71,7 @@ python3 extract.py "<链接>" --output /tmp/extract_result.json
      # 方式 2：环境变量（推荐 cron 场景）
      export BILIBILI_SESSDATA="你的SESSDATA值"
      export BILIBILI_BILI_JCT="bili_jct值"  # 可选
-     export BILIBILI_DEDEUSERID="你的UID"  # 可选
+     export BILIBILI_DEDEUSERID="你的UID"   # 可选
      ```
      获取方式：浏览器登录 B 站 → DevTools → Application → Cookies → 复制 `SESSDATA`/`bili_jct`/`DedeUserID` 字段值
   2. **开启 wbi 签名**（无需登录，但有 1 次额外 nav 接口调用）:
@@ -163,11 +166,18 @@ python3 extract.py "https://example.com/article" --output result.json --upload-i
 python3 extract.py "https://b23.tv/xxx" --output result.json
 ```
 
+### IMA v2.5.2 强化
+
+- `api_call()` 自动重试：网络错误 / HTTP 5xx → tenacity 3 次指数退避（1s/2s/4s）
+- 业务错误（HTTP 4xx / code != 0）抛 `ImaAPIBusinessError`，**不重试**
+- 调优环境变量：`IMA_API_RETRY`（默认 3）/ `IMA_API_BACKOFF`（默认 1）
+- COS 上传「SDK 优先 + Legacy 兜底」：`_cos_upload(prefer='auto')`，自动选 cos-python-sdk-v5
+
 ### IMA 模块文件
 
 | 文件 | 说明 |
 |---|---|
-| `ima_client.py` | IMA OpenAPI 客户端，仅环境变量认证 |
+| `ima_client.py` | IMA OpenAPI 客户端 v1.4（tenacity 重试 + 类型注解 + ETag 判定） |
 | `setup.py` | 凭证引导脚本，交互式输入 |
 
 所有 IMA 请求仅发往 `https://ima.qq.com`，凭证永不出现在代码中。
@@ -176,29 +186,64 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 
 ## 依赖
 
-- **Python 3.10+** + `requests` + `beautifulsoup4` + `jinja2`（见 `requirements.txt`）
-- **Node.js 18+** + `defuddle`（推荐全局安装：`npm i -g defuddle`；脚本也支持自动探测 `npx defuddle`）
+- **Python 3.10+**（pyproject.toml 标 3.10+）：
+  - 必需：`requests` + `beautifulsoup4` + `jinja2`（见 `requirements.txt`）
+  - 可选（强烈推荐）：`tenacity`（B 站风控重试 + IMA API 重试）
+  - 可选：`cos-python-sdk-v5`（IMA COS 上传 SDK 优先）
+  - 可选：`yt-dlp`（YouTube 完整元数据 + 字幕）
+- **Node.js 18+**（一般网页提取）：
+  - 推荐：`defuddle`（`npm i -g defuddle`；脚本也支持自动探测 `npx defuddle`）
 
 ## 项目结构
 
 ```
 url-extract/
-├── SKILL.md                # 本文件
-├── README.md               # 项目说明
-├── extract.py              # 主入口脚本
-├── ima_client.py           # IMA 客户端
-├── setup.py                # IMA 凭证引导
-├── pyproject.toml          # Python 包元数据
-├── requirements.txt        # Python 依赖
-├── templates/              # Markdown 模板（Jinja2）
+├── SKILL.md                  # 本文件
+├── README.md                 # 项目说明
+├── CHANGELOG.md              # 完整版本历史
+├── REFACTOR_PROGRESS.md      # 2026-08-07 重构工作汇报
+├── extract.py                # 主入口脚本（v2.5.2：7 来源 + B 站风控 + 130 测试覆盖）
+├── ima_client.py             # IMA 客户端 v1.4
+├── setup.py                  # IMA 凭证引导
+├── pyproject.toml            # Python 包元数据
+├── requirements.txt          # 依赖清单
+├── templates/                # Markdown 模板（Jinja2，7 个）
 │   ├── bilibili.md.j2
 │   ├── github.md.j2
 │   ├── webpage.md.j2
-│   └── weishi.md.j2
-├── tests/                  # 单元测试
-└── LICENSE
+│   ├── weishi.md.j2
+│   ├── youtube.md.j2
+│   ├── xiaohongshu.md.j2
+│   └── douyin.md.j2
+├── tests/                    # 130 个单元测试
+│   ├── test_bilibili_cookie_retry.py   (24 用例)
+│   ├── test_new_sources.py             (32 用例)
+│   ├── test_ima_client.py              (7 用例)
+│   ├── test_ima_retry.py               (22 用例)
+│   ├── test_cos_sdk_etag.py            (6 用例)
+│   ├── test_url_validation.py          (17 用例)
+│   ├── test_refactor_13.py             (12 用例)
+│   ├── test_templates.py               (10 用例)
+│   └── fixtures/
+└── .github/workflows/test.yml   # GitHub Actions CI（pytest 3.10/3.11/3.12）
 ```
+
+## 测试与 CI
+
+- **130 个测试**覆盖：B 站风控 / 新来源 / IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染
+- **CI**: GitHub Actions 跑 pytest 矩阵（Python 3.10 / 3.11 / 3.12）
+- **本地跑测试**：
+  ```bash
+  pip install -r requirements.txt
+  python3 -m pytest tests/ -v
+  ```
 
 ## 版本历史
 
 详见 [CHANGELOG.md](CHANGELOG.md)
+
+最近一次大规模重构：2026-08-07（详见 [REFACTOR_PROGRESS.md](REFACTOR_PROGRESS.md)）
+- 8 个 PR 合并（PR #8-15）
+- 4 个 issue 关闭
+- 13 / 33 报告项修复
+- 130 个测试（0 回归）
