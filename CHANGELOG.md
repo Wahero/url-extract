@@ -23,6 +23,9 @@
 - **依赖**：`tenacity>=8.0` 加入 `requirements.txt`（推荐装，不装也能跑只是失去重试能力）。
 - **CI workflow**：新增 `timeout-minutes: 20` 防止单 job 卡死导致 matrix 撞 6h limit 取消。
 
+### Fixed
+- **`run_defuddle()` NameError 修复**：此前引用了未定义的模块级变量 `_DEFUDDLE_CWD` / `_DEFUDDLE_SHELL`，导致每次 defuddle 调用都抛 `NameError` 并被静默吞掉——网页正文提取永远降级到 requests meta 路径（只拿 title/description，无正文）。改为从 `_get_defuddle_cmd()` 缓存解包 cmd/shell/cwd。新增 `tests/test_defuddle_fix.py`：5 个回归测试覆盖 JSON/markdown 格式、cwd/shell 透传、npx 入口、defuddle 不可用降级。
+
 ### Changed
 - **SKILL.md 重写**：删除过期的 `~/.workbuddy/...`、`<skill_dir>/scripts/deps`、`<managed_python>` 等硬编码命令路径；新增「零配置快速上手」段落；精简 frontmatter `description`。
 - **defuddle 跨平台探测**：去掉 `~/.workbuddy/binaries/node/22.22.2/` 路径硬编码，按 `DEFUDDLE_BIN` 环境变量 → `PATH` 中的 defuddle → `PATH` 中的 npx → 自动 `npm i -g defuddle` 顺序探测。向后兼容旧的 workbuddy 布局作为 NODE_PATH 兜底。
