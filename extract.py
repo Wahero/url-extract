@@ -643,13 +643,17 @@ def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
     if local_nm:
         env['NODE_PATH'] = local_nm
 
+    # 修复：_DEFUDDLE_CWD/_DEFUDDLE_SHELL 未定义导致 NameError，
+    # 改为从 _get_defuddle_cmd() 缓存解包
+    _cmd, _shell, _cwd = _get_defuddle_cmd()
+
     try:
         result = subprocess.run(
             cmd_args,
             capture_output=True, text=True, timeout=30,
-            cwd=_DEFUDDLE_CWD,
+            cwd=_cwd,
             env=env,
-            shell=_DEFUDDLE_SHELL,
+            shell=_shell,
         )
         if result.returncode != 0:
             print(
