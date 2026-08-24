@@ -1,5 +1,5 @@
 # URL Extract — 通用内容精华抽取
-
+![Stone Badge](https://stone.professorlee.work/api/stone/Wahero/url-extract)
 > 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.5.2：支持 7 种来源（新增 YouTube / 小红书 / 抖音）、B 站风控缓解（tenacity 重试 + wbi 签名 + SESSDATA cookie）、IMA API tenacity 重试、工程化重构（异常化错误处理 / lazy init / URL 验证 / 类型注解 / 130 个单元测试）。**
 
 [![Tests](https://img.shields.io/badge/tests-130%20passed-brightgreen)](tests/)
