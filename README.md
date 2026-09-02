@@ -1,8 +1,8 @@
 # URL Extract — 通用内容精华抽取
 
-> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.5.2：支持 7 种来源（新增 YouTube / 小红书 / 抖音）、B 站风控缓解（tenacity 重试 + wbi 签名 + SESSDATA cookie）、IMA API tenacity 重试、工程化重构（异常化错误处理 / lazy init / URL 验证 / 类型注解 / 130 个单元测试）。**
+> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.5.2 + IMA v1.5：支持 7 种来源（新增 YouTube / 小红书 / 抖音）、B 站风控缓解（tenacity 重试 + wbi 签名 + SESSDATA cookie）、IMA 完整读 API（KB 详情/列内容/取下载 URL/下载文件 + 笔记 API search/list/import/append）、IMA API tenacity 重试、工程化重构（异常化错误处理 / lazy init / URL 验证 / 类型注解 / 150 个单元测试）。**
 
-[![Tests](https://img.shields.io/badge/tests-130%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-150%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -57,7 +57,7 @@ GitHub：  gh CLI → REST API → defuddle 抓 README
 网页：    defuddle → requests meta → 用户手动补
 ```
 
-## IMA 知识库集成（v2.2+，v2.5.2 强化）
+## IMA 知识库集成（v2.2+，v2.5.2 强化，**IMA v1.5 完整读 API**）
 
 抽取完成后可一键导入 IMA 知识库。**凭证通过环境变量传递，不写入文件、不持久化存储。**
 
@@ -98,6 +98,22 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 - 通过环境变量 `IMA_API_RETRY` / `IMA_API_BACKOFF` 可调
 - `_cos_upload_sdk` 修复：不再传 `ContentLength`（int 触发问题），用 `ETag` 判定成功
 - COS 上传「SDK 优先 + Legacy 兜底」（`_cos_upload(prefer='auto')`），强烈推荐 `pip install cos-python-sdk-v5`
+
+### IMA v1.5 完整读 API（PR #18）
+
+补齐之前缺失的"读"路径，让 AI 能真正从 IMA 知识库取文件内容（不只是写入）：
+
+- **KB 读接口（4）**：`get_media_info(media_id)` 拿下载 URL（核心读接口） / `download_kb_file(media_id)` 自动下载 / `get_knowledge_list(kb_id)` 列内容 / `get_knowledge_base(ids)` KB 详细信息
+- **笔记域 API（6）**：全新 `/openapi/note/v1/` —— `search_note` / `list_notebook` / `list_note` / `get_doc_content` / `import_doc` / `append_doc`（带 UTF-8 安全门）
+- **实测**：从「圣中资料」KB 下载「澳門童軍第三十九旅 2026-2027 學年度招募新成員.pdf」（246KB）+ `pdftotext` 提取纯文本
+- **调用示例**（Python REPL）：
+  ```python
+  from ima_client import get_knowledge_list, get_media_info, download_kb_file
+  items = get_knowledge_list("<kb_id>")["data"]["knowledge_list"]
+  pdf = next(i for i in items if i["title"].endswith(".pdf"))
+  data, _ = download_kb_file(pdf["media_id"])  # bytes
+  ```
+- **实现依据**：腾讯官方 ima-skill v1.1.9（`https://app-dl.ima.qq.com/skills/ima-skills-1.1.9.zip`）
 
 ## 输出格式
 
@@ -184,7 +200,7 @@ python3 extract.py "https://b23.tv/xxx" -o result.json
 ```
 url-extract/
 ├── extract.py                # 主入口脚本（v2.5.2：7 来源 + B站风控 + lazy init + 类型注解）
-├── ima_client.py             # IMA OpenAPI 客户端 v1.4（tenacity 重试 + 类型注解 + ETag 判定）
+├── ima_client.py             # IMA OpenAPI 客户端 v1.5（tenacity 重试 + 类型注解 + ETag 判定 + 完整读 API + 笔记 API）
 ├── setup.py                  # IMA 凭证引导（交互式）
 ├── SKILL.md                  # AI Skill 定义（7 来源 + 触发词）
 ├── README.md                 # 本文件
@@ -201,10 +217,10 @@ url-extract/
 │   ├── youtube.md.j2
 │   ├── xiaohongshu.md.j2
 │   └── douyin.md.j2
-├── tests/                    # 130 个单元测试
+├── tests/                    # 150 个单元测试
 │   ├── test_bilibili_cookie_retry.py   (24 用例)
 │   ├── test_new_sources.py             (32 用例)
-│   ├── test_ima_client.py              (7 用例)
+│   ├── test_ima_client.py              (27 用例) ← v1.5: 7 → 27（+20）
 │   ├── test_ima_retry.py               (22 用例)
 │   ├── test_cos_sdk_etag.py            (6 用例)
 │   ├── test_url_validation.py          (17 用例)
@@ -216,7 +232,7 @@ url-extract/
 
 ## 测试与 CI
 
-- **130 个测试**覆盖：B站风控 / 新来源 / IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染 / 集成
+- **150 个测试**覆盖：B站风控 / 新来源 / IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染 / IMA 读 API / 集成
 - **CI**: GitHub Actions 跑 pytest 矩阵（Python 3.10 / 3.11 / 3.12）
 - **本地跑测试**：
   ```bash

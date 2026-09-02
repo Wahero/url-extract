@@ -173,11 +173,38 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 - 调优环境变量：`IMA_API_RETRY`（默认 3）/ `IMA_API_BACKOFF`（默认 1）
 - COS 上传「SDK 优先 + Legacy 兜底」：`_cos_upload(prefer='auto')`，自动选 cos-python-sdk-v5
 
+### IMA v1.5 完整读 API（PR #18）
+
+补齐之前缺失的"读"路径，让 AI 能真正从 IMA 知识库取文件内容（不只是写入）：
+
+- **KB 读接口（4）**：
+  - `get_media_info(media_id)` → 拿下载 URL + `X-IMA-*` headers（核心读接口）
+  - `download_kb_file(media_id)` → 自动下载 KB 文件（封装 `url + headers`）
+  - `get_knowledge_list(kb_id)` → 列 KB 内容（含文件夹/文件、面包屑 `current_path`）
+  - `get_knowledge_base(ids)` → KB 详细信息（封面/描述/推荐问题）
+- **笔记域 API（6 + 1 helper）**：全新 `/openapi/note/v1/`
+  - 读：`search_note` / `list_notebook` / `list_note` / `get_doc_content`
+  - 写：`import_doc` / `append_doc`（带 `_validate_utf8` UTF-8 安全门，避免 IMA 乱码不可逆）
+- **调用示例**（Python REPL）：
+  ```python
+  from ima_client import get_knowledge_list, get_media_info, download_kb_file
+
+  # 列「圣中资料」根目录 → 拿 media_id
+  items = get_knowledge_list("wZ3a69j-uWbELCrN9Ko3YKJZZqiHQWyDYVHqefZLkr8=")["data"]["knowledge_list"]
+  pdf = next(i for i in items if i["title"].endswith(".pdf"))
+
+  # 拿下载 URL → 下载文件
+  info = get_media_info(pdf["media_id"])["data"]
+  data, _ = download_kb_file(pdf["media_id"])  # bytes
+  ```
+- **实测**：从「圣中资料」KB 下载「澳門童軍第三十九旅 2026-2027 學年度招募新成員.pdf」（246KB）+ `pdftotext` 提取纯文本
+- **实现依据**：腾讯官方 ima-skill v1.1.9（`https://app-dl.ima.qq.com/skills/ima-skills-1.1.9.zip`）
+
 ### IMA 模块文件
 
 | 文件 | 说明 |
 |---|---|
-| `ima_client.py` | IMA OpenAPI 客户端 v1.4（tenacity 重试 + 类型注解 + ETag 判定） |
+| `ima_client.py` | IMA OpenAPI 客户端 v1.5（tenacity 重试 + 类型注解 + ETag 判定 + **完整读 API + 笔记 API**） |
 | `setup.py` | 凭证引导脚本，交互式输入 |
 
 所有 IMA 请求仅发往 `https://ima.qq.com`，凭证永不出现在代码中。
@@ -203,7 +230,7 @@ url-extract/
 ├── CHANGELOG.md              # 完整版本历史
 ├── REFACTOR_PROGRESS.md      # 2026-08-07 重构工作汇报
 ├── extract.py                # 主入口脚本（v2.5.2：7 来源 + B 站风控 + 130 测试覆盖）
-├── ima_client.py             # IMA 客户端 v1.4
+├── ima_client.py             # IMA 客户端 v1.5（含完整读 API + 笔记 API）
 ├── setup.py                  # IMA 凭证引导
 ├── pyproject.toml            # Python 包元数据
 ├── requirements.txt          # 依赖清单
@@ -215,10 +242,10 @@ url-extract/
 │   ├── youtube.md.j2
 │   ├── xiaohongshu.md.j2
 │   └── douyin.md.j2
-├── tests/                    # 130 个单元测试
+├── tests/                    # 150 个单元测试
 │   ├── test_bilibili_cookie_retry.py   (24 用例)
 │   ├── test_new_sources.py             (32 用例)
-│   ├── test_ima_client.py              (7 用例)
+│   ├── test_ima_client.py              (27 用例) ← v1.5: 7 → 27（+20）
 │   ├── test_ima_retry.py               (22 用例)
 │   ├── test_cos_sdk_etag.py            (6 用例)
 │   ├── test_url_validation.py          (17 用例)
@@ -230,7 +257,7 @@ url-extract/
 
 ## 测试与 CI
 
-- **130 个测试**覆盖：B 站风控 / 新来源 / IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染
+- **150 个测试**覆盖：B 站风控 / 新来源 / IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染 / IMA 读 API
 - **CI**: GitHub Actions 跑 pytest 矩阵（Python 3.10 / 3.11 / 3.12）
 - **本地跑测试**：
   ```bash

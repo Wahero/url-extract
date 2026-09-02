@@ -82,6 +82,27 @@
 ### Added (PR #14, docs)
 - 新增 `REFACTOR_PROGRESS.md`：记录 2026-08-07 一天完成的 url-extract 重构工作（6 个 PR 详情 + 5 个技术亮点 + 报告进度 + 反思）
 
+### Added (PR #18, ima_client v1.5 完整读 API + 笔记 API)
+- **KB 读接口（4）**：对齐腾讯官方 ima-skill v1.1.9，补齐 `ima_client.py` 缺失的读路径：
+  - `get_knowledge_base(ids)` — KB 详细信息（封面/描述/推荐问题），`ids` 1-20 个
+  - `get_knowledge_list(kb_id, folder_id?, cursor?, limit?)` — 列 KB 根目录/文件夹内容（含文件和文件夹），`limit` 1-50
+  - `get_media_info(media_id)` — **拿文件下载 URL + 必需的 headers**（核心读接口，之前只能写入）
+  - `download_kb_file(media_id)` — 自动用 `url_info.url + headers` 拉文件，返回 `(bytes, url_info)`
+- **笔记域 API（6 + 1 helper）**：全新接口域 `/openapi/note/v1/`（之前未覆盖）：
+  - `search_note(query, search_type=0|1, start, end)` — 搜笔记（0=标题，1=正文）
+  - `list_notebook(cursor="0", limit)` — 列笔记本（首次 `cursor` 必须传 `"0"`，**不是空串**）
+  - `list_note(folder_id, sort_type, cursor, limit)` — 列笔记（`folder_id=""` 全部笔记；根目录从 `list_notebook` 取 `user_list_{uid}`）
+  - `get_doc_content(note_id, content_format=0)` — 读笔记正文（`0`=纯文本，Markdown 不支持）
+  - `import_doc(content, folder_id?)` — 创建新笔记（Markdown）
+  - `append_doc(note_id, content)` — ⚠️ 追加内容到已有笔记（不可撤销），调用方必须先确认目标笔记
+  - `_validate_utf8(content, op)` helper — `import_doc` / `append_doc` 写入前强校验 UTF-8，避免不可逆乱码
+- **测试**：新增 20 个 mock 测试覆盖 10 个新函数 + UTF-8 边界 + 现有 15 个 v1.4 函数回归测试
+  - `tests/test_ima_client.py`：7 → 27（+20）
+  - 总测试数 130 → 150，**零回归**
+- **代码精简**：v1.5 详版（308 行）→ 精简版（90 行，**-71%**），单行函数 docstring + 抽出 UTF-8 helper + `KB_BASE` / `NOTE_BASE` 常量
+- **实现灵感**：腾讯官方 ima-skill v1.1.9（`https://app-dl.ima.qq.com/skills/ima-skills-1.1.9.zip`）
+- **实测覆盖**：20 个知识库元数据 / 「圣中资料」KB 18 条内容（含 17 张 jpg + 1 份 PDF）/ 童军 PDF（246KB）端到端下载+提取
+
 ## [2.5.1] - 2026-08-04
 - 修复 `--ima-raw` 在 B 站无字幕时仍上传空壳 Markdown 的 bug，增加安全守卫。
 
