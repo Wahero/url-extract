@@ -28,6 +28,37 @@
 - **`apple-speech` 默认模式**：去掉 `--on-device`（之前默认开启有截断 bug），改成 server-side ASR。设 `XHS_ASR_ON_DEVICE=1` 显式开启 on-device
 - **依赖声明**：新增 `ffmpeg` + `apple-speech` 到 SKILL.md「外部依赖」段（任一缺失时静默降级到 partial）
 
+## [v2.6.1] — 2026-09-09
+
+### Added
+- **跨平台 ASR backend 抽象**（解决 v2.6 仅 Mac/iOS 可用的平台限制）：
+  - 新模块 `xhs_asr.py`：`ASRBackend` 抽象基类 + 3 个实现
+  - `AppleSpeechBackend`：Mac/iOS（Minis 沙箱内置 apple-speech CLI）
+  - `WhisperBackend`：跨平台（`pip install openai-whisper`，无平台限制）
+  - `GoogleCloudSpeechBackend`：云端（需 `GOOGLE_CLOUD_API_KEY`，REST API 无 SDK 依赖）
+  - 调度函数：`transcribe_with_fallback()` 按可用性自动 fallback
+  - 检测函数：`is_apple_platform()` 仅在 apple-speech 二进制存在时返回 True
+  - **28 个新测试**（`tests/test_xhs_asr.py`）：覆盖 backend 可用性检测 / Apple/Whisper/Google 转写 / fallback 链 / env var 控制
+- **env var 控制**：
+  - `XHS_ASR_BACKEND=auto|apple-speech|whisper|google-cloud-speech`
+  - `WHISPER_MODEL=tiny|base|small|medium|large`（默认 `base`）
+
+### 设计原则
+- **全平台兼容是基础**：v2.6 把 XHS 视频抽取限制在 Minis iOS 用户，对 Linux/Windows/普通 Mac 用户不友好
+- **apple-speech 是 Mac/iOS 检测到时的优选路径**：沙箱体验最佳（本地、低延迟、无 API key）
+- **不能用某个 agent 限死项目整体功能**：任何 Python 用户都能用
+
+### Changed
+- `_apple_speech_transcribe()` 改为包装层，转调 `xhs_asr.transcribe_with_fallback()`（向后兼容）
+- `_try_xhs_video_cdn_pipeline()` 改用 backend 抽象，自动选择最佳 ASR
+- pipeline 结果新增 `asr_backend` 字段（`'apple-speech'` / `'whisper'` / `'google-cloud-speech'`）+ `is_apple_platform` 布尔
+
+### Tests
+- 总计 **179 passed**（v2.6 151 + v2.6.1 新增 28）
+- 全平台测试覆盖：backend 检测、fallback 链、env var 优先级、可用性探测
+
+## [v2.6.0] — 2026-09-09
+
 ### Fixed
 - 修复 v2.5 `extract_xiaohongshu()` 完全无法获取内容的限制（图文笔记仍只能拿到 item_id，但视频笔记现在能拿到完整转写 + 时间分段 + 封面 + 作者 UID）
 - 修复 apple-speech `--on-device` 模式的截断 bug（实测 90s 视频只返回最后 30s，约 149 字符；server-side 返回 432 字符完整转写 + 234 个时间分段）

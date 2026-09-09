@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-通用内容抽取脚本 v2.6
+通用内容抽取脚本 v2.6.1
 支持来源：B站视频、GitHub仓库、一般网页URL、腾讯微视视频（降级方案）
+v2.6.1 新增：跨平台 ASR backend 抽象（apple-speech → whisper → google-cloud）
 v2.6 新增：小红书视频笔记自动走 CDN→ASR 抽取完整转写（无需登录）
 增强：抽取后自动导入 IMA 知识库，支持上传 Markdown 精华文档到「RAW」个人知识库
 
@@ -64,7 +65,7 @@ import jinja2
 CST = timezone(timedelta(hours=8))
 
 # 版本号（单一来源，与 pyproject.toml 保持同步）
-__version__ = '2.6.0'
+__version__ = '2.6.1'
 
 # 通用 UA（所有请求都用）
 _UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -1478,52 +1479,23 @@ def _ffmpeg_extract_audio(video_path: str, audio_path: str) -> bool:
 
 
 def _apple_speech_transcribe(audio_path: str, language: str = 'zh-CN') -> dict:
-    """调 apple-speech CLI 转写音频，返回 dict（含 text / segments）。
+    """调 apple-speech CLI 转写音频（v2.6.1 起转用 xhs_asr.transcribe_with_fallback）。
+
+    保留此函数仅为向后兼容外部脚本直接 import；新代码请用 xhs_asr 模块。
 
     返回结构：
         {
             'ok': bool, 'text': str,
             'segments': [{'substring': str, 'timestamp': float, ...}],
             'duration_seconds': float,
+            'backend': 'apple-speech',
         }
-    apple-speech 不可用 / 转写失败时返回 ok=False。
-
-    默认走 server-side STT（更高质量，完整转写）；设 `XHS_ASR_ON_DEVICE=1` 切到
-    on-device（更快但有截断，实测 90s 视频只能拿到最后 30s 文本，不推荐）。
     """
-    if not shutil.which('apple-speech'):
-        return {'ok': False, 'error': 'apple-speech not in PATH'}
-    if not os.path.exists(audio_path):
-        return {'ok': False, 'error': f'audio file missing: {audio_path}'}
-
-    cmd = ['apple-speech', 'transcribe',
-           '--source', audio_path,
-           '--language', language]
-    # 默认不开 --on-device（实测该模式有截断），用 env var 显式开启
-    if os.environ.get('XHS_ASR_ON_DEVICE') == '1':
-        cmd.append('--on-device')
-
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True, timeout=_XHS_TRANSCRIBE_TIMEOUT,
-        )
-        if result.returncode != 0:
-            return {'ok': False, 'error': result.stderr.decode('utf-8', errors='ignore')[:200]}
-        out = result.stdout.decode('utf-8', errors='ignore').strip()
-        data = json.loads(out)
-        # apple-speech 输出在 'data' 字段（也可能直接是顶层）
-        payload = data.get('data', data)
-        return {
-            'ok': True,
-            'text': payload.get('text', '') or '',
-            'segments': payload.get('segments', []) or [],
-            'duration_seconds': payload.get('duration_seconds', 0) or 0,
-        }
-    except subprocess.TimeoutExpired:
-        return {'ok': False, 'error': 'apple-speech timeout'}
-    except Exception as e:
-        return {'ok': False, 'error': str(e)[:200]}
+        from xhs_asr import transcribe_with_fallback
+        return transcribe_with_fallback(audio_path, language)
+    except ImportError:
+        return {'ok': False, 'error': 'xhs_asr module not available'}
 
 
 def _try_xhs_video_cdn_pipeline(link: str, parsed: dict, save_dir: str = '') -> dict:
@@ -1590,8 +1562,12 @@ def _try_xhs_video_cdn_pipeline(link: str, parsed: dict, save_dir: str = '') -> 
         return {'ok': False, 'stage': 'ffmpeg', 'error': 'ffmpeg extract failed',
                 'video_path': video_path, 'cover_path': cover_path}
 
-    # 5. apple-speech 转写
-    asr = _apple_speech_transcribe(audio_path)
+    # 5. ASR 转写（v2.6.1：可插拔 backend，apple-speech → whisper → google-cloud）
+    try:
+        from xhs_asr import transcribe_with_fallback, is_apple_platform
+        asr = transcribe_with_fallback(audio_path)
+    except ImportError:
+        asr = {'ok': False, 'error': 'xhs_asr module not importable'}
     if not asr.get('ok'):
         return {'ok': False, 'stage': 'transcribe', 'error': asr.get('error'),
                 'video_path': video_path, 'cover_path': cover_path, 'audio_path': audio_path}
@@ -1602,6 +1578,8 @@ def _try_xhs_video_cdn_pipeline(link: str, parsed: dict, save_dir: str = '') -> 
         'transcript': asr.get('text', ''),
         'transcript_segments': asr.get('segments', []),
         'transcript_duration_sec': asr.get('duration_seconds', 0),
+        'asr_backend': asr.get('backend', 'unknown'),
+        'is_apple_platform': is_apple_platform() if 'is_apple_platform' in dir() else False,
         'video_url': h264,
         'cover_url': cover,
         'author_uid': info.get('author_uid', ''),
@@ -1673,10 +1651,11 @@ def extract_xiaohongshu(link: str, *, try_video_cdn: bool = True, save_dir: str 
                 },
                 'note': (
                     f'✅ 视频转写成功（CDN→ASR 链路，{len(transcript)} 字 / {len(segments)} 个时间分段）。'
-                    f'转写引擎：Apple Speech（zh-CN）。'
+                    f'ASR backend: {pipeline.get("asr_backend", "unknown")}。'
                     f'文件保存在 `{pipeline.get("save_dir", "")}`。'
                 ),
-                'asr_mode': os.environ.get('XHS_ASR_ON_DEVICE') == '1' and 'on-device' or 'server-side',
+                'asr_backend': pipeline.get('asr_backend', 'unknown'),
+                'is_apple_platform': pipeline.get('is_apple_platform', False),
                 'partial': False,
             })
             return base_result
@@ -1995,6 +1974,8 @@ def _build_context_for_source(data: dict) -> dict:
         'pipeline_stage': data.get('pipeline_stage', '') or '',
         'pipeline_error': data.get('pipeline_error', '') or '',
         'pipeline_files': data.get('pipeline_files', {}) or {},
+        'asr_backend': data.get('asr_backend', '') or '',
+        'is_apple_platform': data.get('is_apple_platform', False),
     }
 
 

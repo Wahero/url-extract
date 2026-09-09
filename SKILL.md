@@ -234,6 +234,48 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
   - 可选：`yt-dlp`（YouTube 完整元数据 + 字幕）
 - **Node.js 18+**（一般网页提取）：
   - 推荐：`defuddle`（`npm i -g defuddle`；脚本也支持自动探测 `npx defuddle`）
+- **ffmpeg**（PATH）：小红书视频抽取链路需要
+- **ASR backend**（小红书视频抽取需要，至少一个）：
+  - **Apple 平台**（Mac / iOS）：自动用 `apple-speech`（Minis 沙箱内置 / Mac 装 Minis 客户端即可）
+  - **跨平台**：装 `pip install openai-whisper`（自动 fallback）
+  - **云端**：设 `GOOGLE_CLOUD_API_KEY` 环境变量（Google Cloud Speech-to-Text）
+
+## ASR Backend 配置（v2.6.1 起跨平台兼容）
+
+设计原则——**全平台兼容是基础，apple-speech 是 Mac/iOS 检测到时的优选路径，不限制项目整体功能**。
+
+| 平台 | 推荐 ASR backend | 安装方法 |
+|---|---|---|
+| **Mac / iOS（Minis 沙箱）** | apple-speech（默认优选） | 沙箱内置；Mac 装 Minis 客户端即可 |
+| **Linux / Windows / 其它 Mac** | whisper（默认 fallback） | `pip install openai-whisper` |
+| **任意平台（云端）** | google-cloud-speech | 设 `GOOGLE_CLOUD_API_KEY` env var |
+
+**控制开关**（env var）：
+
+| env var | 默认 | 说明 |
+|---|---|---|
+| `XHS_ASR_BACKEND` | `auto` | `auto` 按优先级尝试可用 backend；也可强制指定 `apple-speech` / `whisper` / `google-cloud-speech` |
+| `XHS_ASR_ON_DEVICE` | 未设 | apple-speech 专用：`1` 开启 on-device STT（实测有截断，默认 server-side） |
+| `WHISPER_MODEL` | `base` | whisper 模型选择：`tiny` / `base` / `small` / `medium` / `large` |
+
+**代码层面**：
+
+- 新模块 `xhs_asr.py` 定义 `ASRBackend` 抽象基类
+- 三个实现：`AppleSpeechBackend` / `WhisperBackend` / `GoogleCloudSpeechBackend`
+- 调度函数：`transcribe_with_fallback(audio_path, language)` 自动按优先级尝试
+- 检测函数：`is_apple_platform()` 返回 `True` 当且仅当 `apple-speech` 二进制存在
+
+**Auto 模式 fallback 链**：
+
+```
+1. apple-speech（Mac/iOS）→ 可用时优先
+  ↓ 失败 / 不可用
+2. whisper（任意平台）→ 装了 openai-whisper 即可用
+  ↓ 失败 / 不可用
+3. google-cloud-speech（云端）→ 有 API key 即可用
+  ↓ 全失败
+→ pipeline stage=transcribe，partial=True 降级
+```
 
 ## 项目结构
 
