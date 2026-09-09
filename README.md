@@ -1,8 +1,8 @@
 # URL Extract — 通用内容精华抽取
 
-> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.6：XHS 视频笔记自动走 CDN→ASR 抽取完整转写（无需登录）+ 7 来源 + B 站风控缓解 + IMA API tenacity 重试 + 工程化重构 + 147 个单元测试。**
+> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.6.1：跨平台 ASR 后端（apple-speech → whisper → google-cloud）+ 179 测试覆盖 + 全平台兼容**。**v2.6：XHS 视频笔记自动走 CDN→ASR 抽取完整转写（无需登录）+ 7 来源 + B 站风控缓解 + IMA API tenacity 重试 + 工程化重构 + 147 个单元测试。**
 
-[![Tests](https://img.shields.io/badge/tests-147%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-179%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)

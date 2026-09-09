@@ -403,7 +403,7 @@ class TestXhsVideoPipeline:
         outer_encoded = urllib.parse.quote(inner_url, safe='')
         return f'<html>oia?deeplink={outer_encoded}</html>'
 
-    @mock.patch('extract._apple_speech_transcribe')
+    @mock.patch('xhs_asr.transcribe_with_fallback')
     @mock.patch('extract._ffmpeg_extract_audio')
     @mock.patch('extract._download_xhs_video')
     @mock.patch('extract.safe_request')
@@ -430,12 +430,13 @@ class TestXhsVideoPipeline:
         mock_dl.side_effect = [True, True]  # video + cover
         # 3. ffmpeg 返回 True（创建临时文件）
         mock_ffmpeg.return_value = True
-        # 4. apple-speech 返回成功
+        # 4. ASR 返回成功
         mock_asr.return_value = {
             'ok': True,
             'text': '转写文本内容',
             'segments': [{'substring': '转写', 'timestamp': 0.0, 'confidence': 0.9}],
             'duration_seconds': 90.0,
+            'backend': 'apple-speech',
         }
 
         parsed = {'item_id': 'abc123', 'kind': 'video', 'canonical_url': 'http://xhs.com/item/abc'}
@@ -507,7 +508,7 @@ class TestXhsVideoPipeline:
         assert result['stage'] == 'ffmpeg'
         assert 'video_path' in result  # 失败时也保留已下载的视频路径便于排查
 
-    @mock.patch('extract._apple_speech_transcribe')
+    @mock.patch('xhs_asr.transcribe_with_fallback')
     @mock.patch('extract._ffmpeg_extract_audio')
     @mock.patch('extract._download_xhs_video')
     @mock.patch('extract.safe_request')
