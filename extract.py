@@ -1293,7 +1293,7 @@ def resolve_xhs_url(link: str) -> dict:
 #   - 完整跳转 URL（含 xsec_token）
 #
 # 链路：短链 HTML → parse deeplink JSON → 拿 master_url → curl 下载 →
-#      ffmpeg 抽 wav → apple-speech 转写（ASR 原始输出，未做人工校对）
+#      ffmpeg 抽 wav → apple-speech 转写（输出 ASR 原始文本）
 #
 # 限制：
 #   - 仅适用于视频笔记（kind=='video'）；图文笔记无 CDN 链接
