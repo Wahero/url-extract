@@ -282,6 +282,370 @@ class TestXiaohongshuExtract:
 
 
 # ============================================================
+# 小红书 v2.6：CDN → ASR 抽取链路（无需登录）
+# ============================================================
+
+class TestXhsDeeplinkParse:
+    """测试 _parse_xhs_deeplink：从 oia?deeplink= URL 抽视频 CDN + 封面 + 作者 UID。
+
+    真实 XHS 结构（双重 URL encoding）：
+        oia?deeplink=xhsdiscover%3A%2F%2Fvideo_feed%2F<id>%3Fh5VideoPreloadInfo%3D%257B...%257D%26...
+        ↓ unquote 1 次
+        xhsdiscover://video_feed/<id>?h5VideoPreloadInfo=%7B...%7D&open_url=...&appuid=...
+        ↓ parse_qs（自动 unquote）
+        {'h5VideoPreloadInfo': '{"title":"","video_info_v2":{...}}', 'open_url': '/...', 'appuid': '...'}
+    """
+
+    def _wrap_deeplink_url(self, inner_query: dict) -> str:
+        """把内层 query dict 包装成完整的 oia 重定向 URL（两层 URL 编码）。"""
+        import urllib.parse
+        # 内层 query string（key=value&key=value 形式）
+        inner_qs = urllib.parse.urlencode(inner_query)
+        # 内层 xhsdiscover URL
+        inner_url = f'xhsdiscover://video_feed/test?{inner_qs}'
+        # 外层 URL encode（deellink query 参数值）
+        outer_encoded = urllib.parse.quote(inner_url, safe='')
+        return f'https://oia.xiaohongshu.com/oia?deeplink={outer_encoded}'
+
+    def test_parse_deeplink_with_h264_and_cover(self):
+        inner_json = json.dumps({
+            'title': '',
+            'video_info_v2': {
+                'image': {'first_frame': 'http://sns-webpic-qc.xhscdn.com/cover.jpg'},
+                'media': {'stream': {
+                    'h264': [{'master_url': 'http://sns-video.xhscdn.com/v.mp4?sign=abc',
+                              'width': 720, 'height': 1280}],
+                    'h265': [],
+                }},
+            },
+        })
+        outer = self._wrap_deeplink_url({
+            'h5VideoPreloadInfo': inner_json,
+            'open_url': '/discovery/item/abc?xsec_token=xyz',
+            'appuid': '63496da800000000180287b2',
+            'shareContent': 'note',
+        })
+        result = extract._parse_xhs_deeplink(outer)
+        assert result['h264_url'] == 'http://sns-video.xhscdn.com/v.mp4?sign=abc'
+        assert result['cover_url'] == 'http://sns-webpic-qc.xhscdn.com/cover.jpg'
+        assert result['author_uid'] == '63496da800000000180287b2'
+        assert result['width'] == 720
+        assert result['height'] == 1280
+
+    def test_parse_deeplink_fallback_to_h265(self):
+        """h264 缺失时回退到 h265。"""
+        inner_json = json.dumps({
+            'video_info_v2': {
+                'media': {'stream': {
+                    'h264': [],
+                    'h265': [{'master_url': 'http://sns-video.xhscdn.com/v265.mp4?sign=xyz',
+                              'width': 720, 'height': 1280}],
+                }},
+            },
+        })
+        outer = self._wrap_deeplink_url({
+            'h5VideoPreloadInfo': inner_json,
+            'appuid': 'uid123',
+        })
+        result = extract._parse_xhs_deeplink(outer)
+        assert result['h265_url'] == 'http://sns-video.xhscdn.com/v265.mp4?sign=xyz'
+        assert result['h264_url'] == ''  # h264 空
+        assert result['author_uid'] == 'uid123'
+
+    def test_parse_deeplink_malformed_returns_empty(self):
+        result = extract._parse_xhs_deeplink('not a url at all')
+        assert result['h264_url'] == ''
+        assert result['cover_url'] == ''
+
+    def test_parse_deeplink_missing_deeplink_param(self):
+        result = extract._parse_xhs_deeplink('https://oia.xiaohongshu.com/oia?other=1')
+        assert result['h264_url'] == ''
+
+    def test_parse_deeplink_web_spa_html(self):
+        """Web 短链 HTML 路径：HTML 含 sns-video-*.mp4?sign= 与 sns-webpic-*.jpg。
+
+        实测（2026-09-09）：xhslink.cn 短链在桌面浏览器打开时返回 SPA 页面，
+        window.__INITIAL_STATE__ 里嵌入完整 note JSON，视频 CDN URL 明文，
+        / 写成了 \\u002F。
+        """
+        web_html = '''
+        <html><script>window.__INITIAL_STATE__ = {
+            "noteData": {
+                "video": {
+                    "media": {
+                        "stream": {
+                            "h264": [{"master_url": "http:\\u002F\\u002Fsns-video-v27.xhscdn.com\\u002Fstream\\u002F79\\u002F110\\u002F259\\u002Fabc.mp4?sign=xyz&t=123"}]
+                        }
+                    }
+                }
+            }
+        };</script>
+        <a href="http:\\u002F\\u002Fsns-video-v27.xhscdn.com\\u002Fstream\\u002F79\\u002F110\\u002F309\\u002Fabc.mp4?sign=xyz&t=123">h265</a>
+        <img src="http:\\u002F\\u002Fsns-webpic-qc.xhscdn.com\\u002F20260909\\u002Fabc\\u002Fspectrum\\u002Ftest!h5_1080jpg"/>
+        "userId":"68db3a0d0000000037009a22"
+        </html>
+        '''
+        result = extract._parse_xhs_deeplink(web_html)
+        assert result['h264_url'].endswith('/259/abc.mp4?sign=xyz&t=123')
+        assert result['h265_url'].endswith('/309/abc.mp4?sign=xyz&t=123')
+        assert result['cover_url'].endswith('test!h5_1080jpg')
+        assert result['author_uid'] == '68db3a0d0000000037009a22'
+
+
+class TestXhsVideoPipeline:
+    """测试 _try_xhs_video_cdn_pipeline：CDN→ASR 主流程的 stage 划分。"""
+
+    def _make_html(self, inner_query: dict) -> str:
+        """构造模拟的 oia 重定向 HTML。"""
+        import urllib.parse
+        inner_qs = urllib.parse.urlencode(inner_query)
+        inner_url = f'xhsdiscover://video_feed/test?{inner_qs}'
+        outer_encoded = urllib.parse.quote(inner_url, safe='')
+        return f'<html>oia?deeplink={outer_encoded}</html>'
+
+    @mock.patch('extract._apple_speech_transcribe')
+    @mock.patch('extract._ffmpeg_extract_audio')
+    @mock.patch('extract._download_xhs_video')
+    @mock.patch('extract.safe_request')
+    def test_pipeline_success(self, mock_safe_req, mock_dl, mock_ffmpeg, mock_asr):
+        # 1. safe_request 返回 HTML（含 deeplink）
+        inner_json = json.dumps({
+            'title': '',
+            'video_info_v2': {
+                'image': {'first_frame': 'http://cover.jpg'},
+                'media': {'stream': {
+                    'h264': [{'master_url': 'http://video.mp4?sign=abc',
+                              'width': 720, 'height': 1280}],
+                }},
+            },
+        })
+        html = self._make_html({
+            'h5VideoPreloadInfo': inner_json,
+            'appuid': 'uid_xyz',
+            'open_url': '/discovery/item/abc',
+        })
+        mock_resp = mock.Mock(text=html, url='https://oia.xiaohongshu.com/oia?...')
+        mock_safe_req.return_value = mock_resp
+        # 2. 下载返回 True（创建临时文件）
+        mock_dl.side_effect = [True, True]  # video + cover
+        # 3. ffmpeg 返回 True（创建临时文件）
+        mock_ffmpeg.return_value = True
+        # 4. apple-speech 返回成功
+        mock_asr.return_value = {
+            'ok': True,
+            'text': '转写文本内容',
+            'segments': [{'substring': '转写', 'timestamp': 0.0, 'confidence': 0.9}],
+            'duration_seconds': 90.0,
+        }
+
+        parsed = {'item_id': 'abc123', 'kind': 'video', 'canonical_url': 'http://xhs.com/item/abc'}
+        with mock.patch('extract.os.path.exists', return_value=True):
+            result = extract._try_xhs_video_cdn_pipeline('http://xhslink.cn/o/abc', parsed)
+
+        assert result['ok'] is True
+        assert result['transcript'] == '转写文本内容'
+        assert len(result['transcript_segments']) == 1
+        assert result['author_uid'] == 'uid_xyz'
+        assert result['video_url'] == 'http://video.mp4?sign=abc'
+        assert result['cover_url'] == 'http://cover.jpg'
+
+    @mock.patch('extract.safe_request')
+    def test_pipeline_no_deeplink_in_html(self, mock_safe_req):
+        """HTML 里没有 deeplink 时，stage=parse_deeplink。"""
+        mock_resp = mock.Mock(text='<html>no oia link here</html>', url='http://x')
+        mock_safe_req.return_value = mock_resp
+        result = extract._try_xhs_video_cdn_pipeline(
+            'http://xhslink.cn/o/abc',
+            {'item_id': 'abc', 'kind': 'video', 'canonical_url': 'http://x'},
+        )
+        assert result['ok'] is False
+        assert result['stage'] == 'parse_deeplink'
+
+    @mock.patch('extract._download_xhs_video')
+    @mock.patch('extract.safe_request')
+    def test_pipeline_download_failure(self, mock_safe_req, mock_dl):
+        """CDN URL 有但下载失败时，stage=download_video。"""
+        inner_json = json.dumps({
+            'title': '',
+            'video_info_v2': {
+                'media': {'stream': {'h264': [{'master_url': 'http://video.mp4',
+                                                'width': 720, 'height': 1280}]}},
+            },
+        })
+        html = self._make_html({'h5VideoPreloadInfo': inner_json, 'appuid': 'uid'})
+        mock_resp = mock.Mock(text=html, url='http://x')
+        mock_safe_req.return_value = mock_resp
+        mock_dl.return_value = False  # 下载失败
+        result = extract._try_xhs_video_cdn_pipeline(
+            'http://xhslink.cn/o/abc',
+            {'item_id': 'abc', 'kind': 'video', 'canonical_url': 'http://x'},
+        )
+        assert result['ok'] is False
+        assert result['stage'] == 'download_video'
+
+    @mock.patch('extract._ffmpeg_extract_audio')
+    @mock.patch('extract._download_xhs_video')
+    @mock.patch('extract.safe_request')
+    def test_pipeline_ffmpeg_failure(self, mock_safe_req, mock_dl, mock_ffmpeg):
+        """下载成功但 ffmpeg 抽音失败时，stage=ffmpeg。"""
+        inner_json = json.dumps({
+            'video_info_v2': {
+                'media': {'stream': {'h264': [{'master_url': 'http://video.mp4',
+                                                'width': 720, 'height': 1280}]}},
+            },
+        })
+        html = self._make_html({'h5VideoPreloadInfo': inner_json})
+        mock_resp = mock.Mock(text=html, url='http://x')
+        mock_safe_req.return_value = mock_resp
+        mock_dl.return_value = True  # 下载成功
+        mock_ffmpeg.return_value = False  # ffmpeg 失败
+        result = extract._try_xhs_video_cdn_pipeline(
+            'http://xhslink.cn/o/abc',
+            {'item_id': 'abc', 'kind': 'video', 'canonical_url': 'http://x'},
+        )
+        assert result['ok'] is False
+        assert result['stage'] == 'ffmpeg'
+        assert 'video_path' in result  # 失败时也保留已下载的视频路径便于排查
+
+    @mock.patch('extract._apple_speech_transcribe')
+    @mock.patch('extract._ffmpeg_extract_audio')
+    @mock.patch('extract._download_xhs_video')
+    @mock.patch('extract.safe_request')
+    def test_pipeline_transcribe_failure(self, mock_safe_req, mock_dl, mock_ffmpeg, mock_asr):
+        """下载 + ffmpeg 成功但 ASR 失败时，stage=transcribe。"""
+        inner_json = json.dumps({
+            'video_info_v2': {
+                'media': {'stream': {'h264': [{'master_url': 'http://video.mp4',
+                                                'width': 720, 'height': 1280}]}},
+            },
+        })
+        html = self._make_html({'h5VideoPreloadInfo': inner_json})
+        mock_resp = mock.Mock(text=html, url='http://x')
+        mock_safe_req.return_value = mock_resp
+        mock_dl.return_value = True
+        mock_ffmpeg.return_value = True
+        mock_asr.return_value = {'ok': False, 'error': 'apple-speech timeout'}
+        result = extract._try_xhs_video_cdn_pipeline(
+            'http://xhslink.cn/o/abc',
+            {'item_id': 'abc', 'kind': 'video', 'canonical_url': 'http://x'},
+        )
+        assert result['ok'] is False
+        assert result['stage'] == 'transcribe'
+        assert result['error'] == 'apple-speech timeout'
+        assert 'audio_path' in result  # 失败时也保留 wav 路径
+
+    def test_fill_xhs_result_from_video_dict(self):
+        """_fill_xhs_result_from_video_dict 从内层 JSON 填充 result。"""
+        result = {
+            'h264_url': '', 'h265_url': '', 'cover_url': '',
+            'author_uid': '', 'item_url': '',
+            'width': 0, 'height': 0,
+        }
+        data = {
+            'video_info_v2': {
+                'image': {'first_frame': 'http://cover.jpg'},
+                'media': {'stream': {
+                    'h264': [{'master_url': 'http://v.mp4', 'width': 720, 'height': 1280}],
+                    'h265': [{'master_url': 'http://v265.mp4', 'width': 720, 'height': 1280}],
+                }},
+            },
+            'appuid': 'uid_abc',
+            'open_url': '/discovery/item/abc',
+        }
+        extract._fill_xhs_result_from_video_dict(result, data, qs={})
+        assert result['h264_url'] == 'http://v.mp4'
+        assert result['h265_url'] == 'http://v265.mp4'
+        assert result['cover_url'] == 'http://cover.jpg'
+        assert result['author_uid'] == 'uid_abc'
+        assert result['width'] == 720
+        assert result['height'] == 1280
+
+    def test_fill_xhs_result_falls_back_to_qs(self):
+        """appuid 不在 JSON 时从 qs 兜底取。"""
+        result = {
+            'h264_url': '', 'h265_url': '', 'cover_url': '',
+            'author_uid': '', 'item_url': '',
+            'width': 0, 'height': 0,
+        }
+        # JSON 没有 appuid，但 qs query string 里有
+        extract._fill_xhs_result_from_video_dict(
+            result, {'video_info_v2': {'media': {'stream': {}}}},
+            qs={'appuid': ['uid_from_qs'], 'open_url': ['/from/qs']},
+        )
+        assert result['author_uid'] == 'uid_from_qs'
+        assert result['item_url'] == '/from/qs'
+
+
+class TestXhsExtractV26:
+    """测试 extract_xiaohongshu v2.6：视频笔记走 CDN→ASR 链路。"""
+
+    @mock.patch('extract._try_xhs_video_cdn_pipeline')
+    @mock.patch('extract.resolve_xhs_url')
+    def test_extract_video_calls_pipeline(self, mock_resolve, mock_pipeline):
+        mock_resolve.return_value = {
+            'item_id': 'abc123', 'kind': 'video', 'canonical_url': 'http://xhs.com/item/abc',
+        }
+        mock_pipeline.return_value = {
+            'ok': True,
+            'transcript': '完整转写文本',
+            'transcript_segments': [{'substring': '你好', 'timestamp': 0.0, 'confidence': 0.9}],
+            'transcript_duration_sec': 60.0,
+            'video_url': 'http://video.mp4',
+            'cover_url': 'http://cover.jpg',
+            'cover_local': '/tmp/cover.jpg',
+            'video_local': '/tmp/video.mp4',
+            'audio_local': '/tmp/audio.wav',
+            'author_uid': 'uid_xyz',
+            'item_url_with_token': '/discovery/item/abc?t=1',
+            'save_dir': '/tmp/xhs_video_test',
+        }
+        result = extract.extract_xiaohongshu('http://xhslink.cn/o/abc')
+        assert result['partial'] is False
+        assert result['transcript'] == '完整转写文本'
+        assert result['pipeline_status'] == 'success'
+        assert result['cover'] == '/tmp/cover.jpg'
+        assert result['video_url'] == 'http://video.mp4'
+
+    @mock.patch('extract._try_xhs_video_cdn_pipeline')
+    @mock.patch('extract.resolve_xhs_url')
+    def test_extract_video_pipeline_failure_falls_back(self, mock_resolve, mock_pipeline):
+        """CDN→ASR 失败时降级到 partial=True。"""
+        mock_resolve.return_value = {
+            'item_id': 'abc', 'kind': 'video', 'canonical_url': 'http://x',
+        }
+        mock_pipeline.return_value = {'ok': False, 'stage': 'transcribe', 'error': 'timeout'}
+        result = extract.extract_xiaohongshu('http://xhslink.cn/o/abc')
+        assert result['partial'] is True
+        assert result['pipeline_status'] == 'failed'
+        assert result['pipeline_stage'] == 'transcribe'
+        assert 'CDN→ASR 链路尝试失败' in result['note']
+
+    @mock.patch('extract.resolve_xhs_url')
+    def test_extract_non_video_skips_pipeline(self, mock_resolve):
+        """kind != 'video' 不走 CDN 链路（图文笔记无视频流）。"""
+        mock_resolve.return_value = {
+            'item_id': 'abc', 'kind': 'note', 'canonical_url': 'http://x',
+        }
+        with mock.patch('extract._try_xhs_video_cdn_pipeline') as mock_pipeline:
+            result = extract.extract_xiaohongshu('http://xhslink.cn/o/abc')
+            mock_pipeline.assert_not_called()
+            assert result['partial'] is True
+
+    @mock.patch('extract.resolve_xhs_url')
+    def test_extract_disabled_via_env(self, mock_resolve):
+        """XHS_VIDEO_CDN=0 时不走 CDN 链路。"""
+        import os
+        mock_resolve.return_value = {
+            'item_id': 'abc', 'kind': 'video', 'canonical_url': 'http://x',
+        }
+        with mock.patch.dict(os.environ, {'XHS_VIDEO_CDN': '0'}):
+            with mock.patch('extract._try_xhs_video_cdn_pipeline') as mock_pipeline:
+                result = extract.extract_xiaohongshu('http://xhslink.cn/o/abc')
+                mock_pipeline.assert_not_called()
+                assert result['partial'] is True
+
+
+# ============================================================
 # 抖音测试
 # ============================================================
 

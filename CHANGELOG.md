@@ -1,6 +1,38 @@
 # Changelog
 
-## [Unreleased]
+## [Unreleased] — v2.6
+
+### Added
+- **小红书视频笔记自动 CDN→ASR 抽取（无需登录）**：
+  - 关键发现（2026-09-09）：xhslink.cn 短链重定向时携带视频 CDN 直链 + 封面 + 作者 UID，无需登录即可下载。
+  - 两条抽取路径：
+    - **iOS App 路径**：重定向到 `oia.xiaohongshu.com/oia?deeplink=...`，query 是 URL-encoded JSON（`h5VideoPreloadInfo` 字段）
+    - **Web 路径**：xhslink.cn 短链在桌面浏览器返回 SPA，`window.__INITIAL_STATE__` 含 `sns-video-*.mp4?sign=...` + `sns-webpic-*.jpg`
+  - 抽取链路：`xhslink.cn → oia/web HTML → _parse_xhs_deeplink 抽 master_url → 下载 h264（h265 兜底，限 100MB）→ ffmpeg 抽 wav → apple-speech 转写 → 完整文本 + 时间分段`
+  - 新增 5 个函数：
+    - `_parse_xhs_deeplink(html_or_url)`：双路径 deeplink 解析
+    - `_fill_xhs_result_from_video_dict(result, data, qs)`：JSON 字段填充 helper
+    - `_download_xhs_video(cdn_url, save_path, max_bytes)`：流式下载 + 大小限制
+    - `_ffmpeg_extract_audio(video_path, audio_path)`：抽 wav（16kHz 单声道）
+    - `_apple_speech_transcribe(audio_path, language)`：调 `apple-speech` CLI 包装器
+    - `_try_xhs_video_cdn_pipeline(link, parsed, save_dir)`：主流程编排
+  - 模板升级 `templates/xiaohongshu.md.j2`：成功路径显示完整转写 + 时间分段表；partial 路径保留 v2.5 行为
+  - 上下文新增字段：`transcript` / `transcript_segments` / `cover` / `video_url` / `author_uid` / `pipeline_status` / `pipeline_stage` / `pipeline_error` / `pipeline_files`
+  - **16 个新单测**（`tests/test_new_sources.py`）：覆盖 deeplink 解析（iOS + Web 两条路径）/ pipeline 各 stage 失败降级 / 视频/非视频分流 / env var 控制
+- **控制开关**（env var）：
+  - `XHS_VIDEO_CDN=0`：关闭视频 CDN 链路（默认开启）
+  - `XHS_ASR_ON_DEVICE=1`：强制 on-device STT（默认 server-side，质量高完整；on-device 实测 90s 视频只返回最后 30s）
+
+### Changed
+- **`extract_xiaohongshu()`**：v2.5 只返回 partial 元数据；v2.6 先尝试 CDN→ASR 链路，成功返回 `partial=False` + 完整 `transcript` + 元数据，失败降级到 v2.5 行为并记录 `pipeline_stage` / `pipeline_error`
+- **`apple-speech` 默认模式**：去掉 `--on-device`（之前默认开启有截断 bug），改成 server-side ASR。设 `XHS_ASR_ON_DEVICE=1` 显式开启 on-device
+- **依赖声明**：新增 `ffmpeg` + `apple-speech` 到 SKILL.md「外部依赖」段（任一缺失时静默降级到 partial）
+
+### Fixed
+- 修复 v2.5 `extract_xiaohongshu()` 完全无法获取内容的限制（图文笔记仍只能拿到 item_id，但视频笔记现在能拿到完整转写 + 时间分段 + 封面 + 作者 UID）
+- 修复 apple-speech `--on-device` 模式的截断 bug（实测 90s 视频只返回最后 30s，约 149 字符；server-side 返回 432 字符完整转写 + 234 个时间分段）
+
+## [v2.5.2] — 2026-08-07
 
 ### Added
 - **新来源支持：YouTube / 小红书 / 抖音**（issue #4）：

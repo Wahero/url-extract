@@ -1,6 +1,6 @@
 [project]
 name = "url-extract"
-version = "2.5.2"
+version = "2.6.0"
 description = "通用内容精华抽取 — 把 B 站视频、GitHub 仓库、一般网页、微视链接变成结构化 Markdown，可选上传到 IMA 知识库"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -1,11 +1,39 @@
 # {{ title or '小红书笔记' }}
 
 > 来源：小红书 · 链接：{{ url }}
-{% if item_id %}> 笔记 ID：{{ item_id }}
+{% if item_id %}> 笔记 ID：`{{ item_id }}`
 {% endif %}{% if kind and kind != 'unknown' %}> 类型：{{ kind }}
+{% endif %}{% if duration_sec %}> 时长：约 {{ duration_sec // 60 }} 分 {{ duration_sec % 60 }} 秒
+{% endif %}{% if pipeline_status == 'success' %}> 抽取方式：CDN → ASR 链路（无需登录）
+{% endif %}
+
+{% if cover %}{% if cover.startswith('http') %}![封面]({{ cover }}){% else %}*封面已保存到本地：`{{ cover }}`*{% endif %}
 {% endif %}
 
 ---
+
+{% if transcript %}
+
+## ✅ 视频转写（Apple Speech zh-CN）
+
+> 本次抽取通过视频 CDN 直链 → ffmpeg 抽音 → Apple Speech 转写，**无需登录小红书账号**。
+> 转写由 ASR 自动生成，难免有错漏（尤其医学/法律等专业术语），请以原视频及专业人士面诊为准。
+
+### 完整转写文本
+
+{{ transcript }}
+
+{% if transcript_segments %}
+
+### 时间分段转写
+
+| 时间 | 内容 |
+|---|---|
+{% for seg in transcript_segments %}| `{{ "%.1f"|format(seg.timestamp) }}s` | {{ seg.substring }} |
+{% endfor %}
+{% endif %}
+
+{% else %}
 
 ## ⚠️ 部分抽取
 
@@ -16,19 +44,32 @@
 > 2. 复制笔记标题到 WebSearch 搜索 → 用 defuddle 抓取第三方报道
 > 3. 复制笔记作者名 + 标题 → 在搜索引擎搜索同主题文章
 
+{% if pipeline_stage %}
+> **视频 CDN→ASR 链路失败详情**：stage=`{{ pipeline_stage }}`，error=`{{ pipeline_error[:200] if pipeline_error else '' }}`
+{% endif %}
+{% endif %}
+
 ---
 
 ## 参考资料
 
 - 原始链接：{{ url }}
 - 笔记 ID：`{{ item_id }}`
+{% if author_uid %}- 作者 UID：`{{ author_uid }}`
+{% endif %}{% if cover_url %}- 封面图：<{{ cover_url }}>
+{% endif %}{% if video_url %}- 视频 CDN：<{{ video_url }}>
+{% endif %}{% if pipeline_files %}{% if pipeline_files.video %}- 视频文件：`{{ pipeline_files.video }}`
+{% endif %}{% if pipeline_files.audio %}- 音频文件：`{{ pipeline_files.audio }}`
+{% endif %}{% if pipeline_files.cover %}- 封面文件：`{{ pipeline_files.cover }}`
+{% endif %}{% endif %}
 
 ---
 
 > ⚠️ **重要声明**
 >
 > 本文档由 url-extract v{{ version }}（学术测试版）生成。
-> 小红书平台反爬严格，未登录环境无法获取笔记内容，本文仅记录了元数据（笔记 ID + 类型）。
-> 实际内容请通过上述方法补充。
+> {% if transcript %}本次抽取采用 CDN→ASR 链路，转写为 Apple Speech 自动生成，难免有错漏，**医学/法律等专业内容请以原视频及专业人士面诊为准**。
+> {% else %}小红书平台反爬严格，未登录环境无法获取笔记内容，本文仅记录了元数据（笔记 ID + 类型）。
+> 实际内容请通过上述方法补充。{% endif %}
 >
 > 本工具请勿用于生产环境。

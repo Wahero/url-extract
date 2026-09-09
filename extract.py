@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-通用内容抽取脚本 v2.5.2
+通用内容抽取脚本 v2.6
 支持来源：B站视频、GitHub仓库、一般网页URL、腾讯微视视频（降级方案）
+v2.6 新增：小红书视频笔记自动走 CDN→ASR 抽取完整转写（无需登录）
 增强：抽取后自动导入 IMA 知识库，支持上传 Markdown 精华文档到「RAW」个人知识库
 
 v2.5.1 变更：修复 --ima-raw 在 B站无字幕时仍上传空壳 Markdown 的 bug，增加安全守卫：无字幕且无 --ima-raw-md 时阻止上传并提示正确流程。
@@ -63,7 +64,7 @@ import jinja2
 CST = timezone(timedelta(hours=8))
 
 # 版本号（单一来源，与 pyproject.toml 保持同步）
-__version__ = '2.5.2'
+__version__ = '2.6.0'
 
 # 通用 UA（所有请求都用）
 _UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -329,6 +330,7 @@ def _wbi_sign(params: dict) -> dict:
 
 import shutil
 from pathlib import Path
+import tempfile
 
 
 def _resolve_defuddle() -> tuple[str, bool, str | None]:
@@ -1194,8 +1196,24 @@ def _fmt_youtube_date(upload_date: str) -> str:
 
 
 # ============================================================
-# 小红书 抽取（降级方案：defuddle 抓公开页 + 强 note 提示）
+# 小红书 抽取
 # ============================================================
+#
+# 两条抽取路径：
+#   1. 元数据路径（轻量）：xhslink.cn 短链 → 重定向链 → 解析 item_id + 类型（无登录态）
+#   2. 视频路径（完整）：视频笔记时，短链 deeplink HTML 含视频 CDN 直链 + 封面 URL，
+#      下载 → ffmpeg 抽音 → apple-speech 转写 → 拿到完整视频转写文本
+#
+# 视频路径借鉴 2026-09-08 实测发现（短链重定向页 oia?deeplink=… query 里
+# 完整携带 h264/h265 master_url + 签名参数，无需登录）。
+
+# 视频下载上限（100MB），超过视为异常或录制长视频，避免磁盘爆掉
+_XHS_VIDEO_MAX_BYTES = 100 * 1024 * 1024
+# ffmpeg 抽音超时（秒），90s 视频大约 30s 完成，留 2x 余量
+_XHS_FFMPEG_TIMEOUT = 60
+# apple-speech 转写超时（秒），90s 视频大约 30s 完成，留 5x 余量
+_XHS_TRANSCRIBE_TIMEOUT = 150
+
 
 def resolve_xhs_url(link: str) -> dict:
     """从 xhslink.com 短链 / xiaohongshu.com 长链 解析 item_id + 类型。
@@ -1263,36 +1281,429 @@ def resolve_xhs_url(link: str) -> dict:
     return {'item_id': item_id or '', 'kind': kind or 'unknown', 'canonical_url': canonical_url or link}
 
 
-def extract_xiaohongshu(link: str) -> dict:
-    """小红书笔记/视频抽取（降级方案）。
+# ============================================================
+# 小红书 视频 CDN → ASR 抽取链路（无需登录）
+# ============================================================
+#
+# 关键发现（2026-09-08 实测）：xhslink.cn 短链重定向到 oia.xiaohongshu.com 时，
+# URL query string 里 `oia?deeplink=` 参数是 URL-encoded JSON，携带完整视频元数据：
+#   - h264/h265 master_url（带签名，无需登录就能下载）
+#   - first_frame 封面图 URL
+#   - author UID（appuid）
+#   - 完整跳转 URL（含 xsec_token）
+#
+# 链路：短链 HTML → parse deeplink JSON → 拿 master_url → curl 下载 →
+#      ffmpeg 抽 wav → apple-speech 转写 → 校对 ASR
+#
+# 限制：
+#   - 仅适用于视频笔记（kind=='video'）；图文笔记无 CDN 链接
+#   - ffmpeg 与 apple-speech 缺失时静默降级（标记 partial=True）
+#   - 视频下载有 100MB 上限，避免爆磁盘
+#   - 转写有 150s 超时，长视频可能截断
 
-    现实：小红书页面是 client-side rendered，未登录/沙箱访问拿到的是空壳 HTML。
-    defuddle 同样拿不到内容（只能拿到 og:title/description，但沙箱甚至连 og meta 都没有）。
-    所以：本函数主要返回 item_id + 强 note 提示用户用 WebSearch 搜索同标题补充。
+
+def _parse_xhs_deeplink(html_or_url: str) -> dict:
+    """从短链重定向 HTML / deeplink URL 里抽视频 CDN + 封面 + 作者 UID。
+
+    两条抽取路径（按优先级尝试）：
+      1. iOS App deeplink 路径：oia?deeplink=... （URL-encoded JSON）
+      2. Web 短链 HTML 路径：HTML 里直接含 sns-video-*.mp4?sign=... 和 sns-webpic-*.jpg
+         （xhslink.cn 在桌面浏览器打开时返回的 SPA 页面）
+
+    返回 dict：详见下方初始化。任何字段缺失不影响其他字段返回。
     """
+    result = {
+        'h264_url': '', 'h265_url': '', 'cover_url': '',
+        'author_uid': '', 'item_url': '',
+        'width': 0, 'height': 0,
+    }
+    html = html_or_url or ''
+    if not html:
+        return result
+
+    # ========== 路径 1：iOS App oia?deeplink= 解析 ==========
+    try:
+        # 排除字符：HTML 标签边界（< >）+ 引号（" ' `）+ 空白 + &（query 分隔符）+ \\（JS 转义）
+        m = re.search(r'oia\?deeplink=([^"\'`<>&\s\\]+)', html)
+        if m:
+            encoded = m.group(1)
+            decoded = urllib.parse.unquote(encoded)
+            parsed_q = urllib.parse.urlparse(decoded)
+            qs = urllib.parse.parse_qs(parsed_q.query)
+            inner = qs.get('h5VideoPreloadInfo', [None])[0]
+            if inner:
+                try:
+                    data = json.loads(inner)
+                except Exception:
+                    try:
+                        data = json.loads(urllib.parse.unquote(inner))
+                    except Exception:
+                        data = None
+                if data:
+                    _fill_xhs_result_from_video_dict(result, data, qs)
+                    # 视频 URL 拿到即可提前返回（封面留作后续补充）
+                    if result['h264_url']:
+                        return result
+    except Exception:
+        pass
+
+    # ========== 路径 2：Web 短链 HTML 直接搜索 CDN URL ==========
+    # XHS web SPA 在 window.__INITIAL_STATE__ 里嵌入了完整 note JSON，
+    # 其中视频 CDN URL 是明文（JSON 里的 / 写成 \u002F）。
+    # 解码后正则匹配即可拿到 h264/h265 + cover。
+
+    # 解码 JSON 转义字符：\" → ", \\ → \, \u002F → /
+    unescaped = html.replace(r'\u002F', '/').replace(r'\/', '/').replace(r'\"', '"')
+    # h264 master_url（路径段 /259/ 标记 h264，/309/ 标记 h265）
+    h264_match = re.search(
+        r'(https?://sns-video-[^"\'\s]+\.mp4\?sign=[^"\'\s&]+&t=[^"\'\s&]+)',
+        unescaped,
+    )
+    h265_match = re.search(
+        r'(https?://sns-video-[^"\'\s]+/309/[^"\'\s]+\.mp4\?sign=[^"\'\s&]+&t=[^"\'\s&]+)',
+        unescaped,
+    )
+    if h264_match and '/259/' in h264_match.group(1):
+        result['h264_url'] = h264_match.group(1)
+    if h265_match:
+        result['h265_url'] = h265_match.group(1)
+
+    # cover（first_frame jpg）
+    cover_match = re.search(
+        r'(https?://sns-webpic-[^"\'\s]+!h5_1080jpg)',
+        unescaped,
+    )
+    if not cover_match:
+        cover_match = re.search(
+            r'(https?://sns-webpic-[^"\'\s]+\.(?:jpg|jpeg|png))',
+            unescaped,
+        )
+    if cover_match:
+        result['cover_url'] = cover_match.group(1)
+
+    # author_uid（userId 字段，取视频作者）
+    user_match = re.search(r'"userId"\s*:\s*"([0-9a-f]{20,32})"', unescaped)
+    if user_match:
+        result['author_uid'] = user_match.group(1)
+
+    return result
+
+
+def _fill_xhs_result_from_video_dict(result: dict, data: dict, qs: dict) -> None:
+    """从解析出的内层 JSON 填充 result（路径 1 专用）。
+
+    result 必须包含 h264_url/h265_url/cover_url/author_uid/item_url/width/height 这 7 个 key。
+    """
+    vinfo = data.get('video_info_v2', {}) or {}
+    media = vinfo.get('media', {}).get('stream', {})
+    for codec in ('h264', 'h265'):
+        arr = media.get(codec, [])
+        if arr and isinstance(arr, list):
+            first = arr[0] if isinstance(arr[0], dict) else {}
+            url = first.get('master_url') or (first.get('backup_urls') or [None])[0]
+            if url:
+                result[f'{codec}_url'] = url
+                result['width'] = int(first.get('width', 0) or 0)
+                result['height'] = int(first.get('height', 0) or 0)
+
+    first_frame = vinfo.get('image', {}).get('first_frame', '')
+    if first_frame:
+        result['cover_url'] = first_frame
+
+    result['author_uid'] = data.get('appuid', '') or qs.get('appuid', [''])[0] or ''
+    result['item_url'] = data.get('open_url', '') or qs.get('open_url', [''])[0] or ''
+
+
+def _download_xhs_video(cdn_url: str, save_path: str, max_bytes: int = _XHS_VIDEO_MAX_BYTES) -> bool:
+    """下载 XHS 视频/封面到本地，带大小限制。
+
+    返回 True=成功，False=失败（网络错误 / 超大小 / HTTP 错误）。
+    超大文件自动清理残留（先停止写入再删除，避免与未关闭的文件句柄冲突）。
+    """
+    if not cdn_url:
+        return False
+    over_limit = False
+    try:
+        with requests.get(
+            cdn_url,
+            headers={'User-Agent': _UA, 'Referer': 'https://www.xiaohongshu.com/'},
+            stream=True,
+            timeout=30,
+        ) as r:
+            r.raise_for_status()
+            written = 0
+            with open(save_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > max_bytes:
+                        over_limit = True
+                        break
+                    f.write(chunk)
+        # `with` 已退出，文件句柄已释放，此时再删除安全
+        if over_limit:
+            try:
+                os.remove(save_path)
+            except OSError:
+                pass
+            return False
+        return os.path.exists(save_path) and os.path.getsize(save_path) > 0
+    except Exception:
+        # 异常路径也清理残留
+        try:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+        except OSError:
+            pass
+        return False
+
+
+def _ffmpeg_extract_audio(video_path: str, audio_path: str) -> bool:
+    """ffmpeg 抽 wav（16kHz 单声道），apple-speech 兼容性最好。"""
+    if not shutil.which('ffmpeg'):
+        return False
+    if not os.path.exists(video_path):
+        return False
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', video_path,
+             '-vn', '-ac', '1', '-ar', '16000',
+             '-f', 'wav', audio_path],
+            capture_output=True, timeout=_XHS_FFMPEG_TIMEOUT,
+        )
+        return result.returncode == 0 and os.path.exists(audio_path)
+    except Exception:
+        return False
+
+
+def _apple_speech_transcribe(audio_path: str, language: str = 'zh-CN') -> dict:
+    """调 apple-speech CLI 转写音频，返回 dict（含 text / segments）。
+
+    返回结构：
+        {
+            'ok': bool, 'text': str,
+            'segments': [{'substring': str, 'timestamp': float, ...}],
+            'duration_seconds': float,
+        }
+    apple-speech 不可用 / 转写失败时返回 ok=False。
+
+    默认走 server-side STT（更高质量，完整转写）；设 `XHS_ASR_ON_DEVICE=1` 切到
+    on-device（更快但有截断，实测 90s 视频只能拿到最后 30s 文本，不推荐）。
+    """
+    if not shutil.which('apple-speech'):
+        return {'ok': False, 'error': 'apple-speech not in PATH'}
+    if not os.path.exists(audio_path):
+        return {'ok': False, 'error': f'audio file missing: {audio_path}'}
+
+    cmd = ['apple-speech', 'transcribe',
+           '--source', audio_path,
+           '--language', language]
+    # 默认不开 --on-device（实测该模式有截断），用 env var 显式开启
+    if os.environ.get('XHS_ASR_ON_DEVICE') == '1':
+        cmd.append('--on-device')
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, timeout=_XHS_TRANSCRIBE_TIMEOUT,
+        )
+        if result.returncode != 0:
+            return {'ok': False, 'error': result.stderr.decode('utf-8', errors='ignore')[:200]}
+        out = result.stdout.decode('utf-8', errors='ignore').strip()
+        data = json.loads(out)
+        # apple-speech 输出在 'data' 字段（也可能直接是顶层）
+        payload = data.get('data', data)
+        return {
+            'ok': True,
+            'text': payload.get('text', '') or '',
+            'segments': payload.get('segments', []) or [],
+            'duration_seconds': payload.get('duration_seconds', 0) or 0,
+        }
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': 'apple-speech timeout'}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)[:200]}
+
+
+def _try_xhs_video_cdn_pipeline(link: str, parsed: dict, save_dir: str = '') -> dict:
+    """小红书视频 CDN→ASR 抽取主入口。
+
+    流程：
+        1. safe_request 拿短链重定向 HTML
+        2. _parse_xhs_deeplink 抽 CDN/封面/作者 UID
+        3. 下载视频（h264 优先）+ 封面
+        4. ffmpeg 抽 wav
+        5. apple-speech 转写
+        6. 组装 dict 返回（含 transcript/segments/cover_local/video_local）
+
+    任意一步失败返回 {'ok': False, ...}；调用方决定是否 fallback。
+    临时目录若未传入 save_dir，使用 mkdtemp 创建但不自动清理（用户可手动删），
+    save_dir 路径在返回 dict 里可见。
+    """
+    item_id = parsed.get('item_id', '')
+    canonical_url = parsed.get('canonical_url', link)
+
+    # 准备保存目录（默认 tempdir，方便清理）
+    if not save_dir:
+        save_dir = tempfile.mkdtemp(prefix='xhs_video_')
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 文件名加 6 字符随机后缀，避免同一 save_dir 下并发调用或 item_id 为空时冲突
+    suffix = hashlib.md5(f'{link}{time.time()}'.encode()).hexdigest()[:6]
+    filename_base = f'xhs_{item_id or "video"}_{suffix}'
+
+    # 1. 拿短链 HTML（已跳转到 oia.xiaohongshu.com）
+    try:
+        r = safe_request(
+            'GET', link,
+            headers={'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15'},
+            allow_redirects=True,
+            timeout=15,
+        )
+        html = r.text or ''
+        # 最终 URL 也带上（很多场景 r.url 比 HTML 内容更直接）
+        html += ' ' + (r.url or '')
+    except Exception as e:
+        return {'ok': False, 'stage': 'fetch_html', 'error': str(e)[:200]}
+
+    # 2. parse deeplink
+    info = _parse_xhs_deeplink(html)
+    h264 = info.get('h264_url') or info.get('h265_url')
+    cover = info.get('cover_url')
+    if not h264:
+        return {'ok': False, 'stage': 'parse_deeplink', 'error': 'CDN URL not found in deeplink', 'info': info}
+
+    # 3. 下载视频 + 封面
+    video_path = os.path.join(save_dir, f'{filename_base}.mp4')
+    if not _download_xhs_video(h264, video_path):
+        return {'ok': False, 'stage': 'download_video', 'error': f'video download failed: {h264[:80]}'}
+
+    cover_path = ''
+    if cover:
+        cover_path = os.path.join(save_dir, f'{filename_base}.jpg')
+        _download_xhs_video(cover, cover_path, max_bytes=5 * 1024 * 1024)  # 封面限 5MB
+
+    # 4. ffmpeg 抽 wav
+    audio_path = os.path.join(save_dir, f'{filename_base}.wav')
+    if not _ffmpeg_extract_audio(video_path, audio_path):
+        return {'ok': False, 'stage': 'ffmpeg', 'error': 'ffmpeg extract failed',
+                'video_path': video_path, 'cover_path': cover_path}
+
+    # 5. apple-speech 转写
+    asr = _apple_speech_transcribe(audio_path)
+    if not asr.get('ok'):
+        return {'ok': False, 'stage': 'transcribe', 'error': asr.get('error'),
+                'video_path': video_path, 'cover_path': cover_path, 'audio_path': audio_path}
+
+    # 6. 组装返回
+    return {
+        'ok': True,
+        'transcript': asr.get('text', ''),
+        'transcript_segments': asr.get('segments', []),
+        'transcript_duration_sec': asr.get('duration_seconds', 0),
+        'video_url': h264,
+        'cover_url': cover,
+        'author_uid': info.get('author_uid', ''),
+        'item_url_with_token': info.get('item_url', ''),
+        'width': info.get('width', 0),
+        'height': info.get('height', 0),
+        'video_local': video_path,
+        'cover_local': cover_path,
+        'audio_local': audio_path,
+        'save_dir': save_dir,
+    }
+
+
+def extract_xiaohongshu(link: str, *, try_video_cdn: bool = True, save_dir: str = '') -> dict:
+    """小红书笔记抽取（v2.6：支持视频笔记无登录态完整抽取）。
+
+    路径选择：
+      - kind == 'video' 且 try_video_cdn=True：尝试 CDN→ASR 链路，成功返回完整转写
+      - 失败 / kind != 'video'：降级到 v2.5 行为（partial=True，强 note 提示）
+
+    可通过环境变量 XHS_VIDEO_CDN=0 关闭视频链路（默认开启）。
+    """
+    if try_video_cdn and os.environ.get('XHS_VIDEO_CDN', '1') == '0':
+        try_video_cdn = False
+
     parsed = resolve_xhs_url(link)
     item_id = parsed['item_id']
     canonical_url = parsed['canonical_url']
     kind = parsed['kind']
 
-    note = (
-        '⚠️ 小红书需要登录态才能获取内容。沙箱 / 无 cookie 环境只能拿到 item_id，'
-        '无法获取笔记文字/图片/视频元数据。'
-        '**建议：复制笔记标题到 WebSearch 搜索，用 defuddle 抓取第三方报道补充内容。**'
-    )
-    if not item_id:
-        note = '⚠️ 无法解析小红书 item_id（短链可能需要先在微信内打开一次）。' + note
-
-    return {
+    base_result = {
         'source': 'xiaohongshu',
         'item_id': item_id,
         'kind': kind,
         'url': canonical_url or link,
         'title': '',
         'desc': '',
-        'note': note,
-        'partial': True,  # 标记为部分成功（issue #4 验收要求）
+        'note': '',
+        'partial': True,
     }
+
+    # 路径 1：视频笔记 + 启用 CDN 链路 → 尝试 ASR
+    if try_video_cdn and kind == 'video' and item_id:
+        pipeline = _try_xhs_video_cdn_pipeline(link, parsed, save_dir=save_dir)
+        if pipeline.get('ok'):
+            transcript = pipeline.get('transcript', '').strip()
+            segments = pipeline.get('transcript_segments', []) or []
+            duration = int(pipeline.get('transcript_duration_sec', 0) or 0)
+
+            # title / desc 都用转写文本（XHS deeplink 不带 title）
+            base_result.update({
+                'title': transcript[:80] + ('…' if len(transcript) > 80 else '') if transcript else '',
+                'desc': transcript,
+                'transcript': transcript,
+                'transcript_segments': segments,
+                'duration_sec': duration,
+                'cover': pipeline.get('cover_local', '') or pipeline.get('cover_url', ''),
+                'cover_url': pipeline.get('cover_url', ''),
+                'video_url': pipeline.get('video_url', ''),
+                'author_uid': pipeline.get('author_uid', ''),
+                'item_url_with_token': pipeline.get('item_url_with_token', ''),
+                'pipeline_status': 'success',
+                'pipeline_stage': 'transcribe',
+                'pipeline_save_dir': pipeline.get('save_dir', ''),
+                'pipeline_files': {
+                    'video': pipeline.get('video_local', ''),
+                    'audio': pipeline.get('audio_local', ''),
+                    'cover': pipeline.get('cover_local', ''),
+                },
+                'note': (
+                    f'✅ 视频转写成功（CDN→ASR 链路，{len(transcript)} 字 / {len(segments)} 个时间分段）。'
+                    f'转写引擎：Apple Speech（zh-CN）。'
+                    f'文件保存在 `{pipeline.get("save_dir", "")}`。'
+                ),
+                'asr_mode': os.environ.get('XHS_ASR_ON_DEVICE') == '1' and 'on-device' or 'server-side',
+                'partial': False,
+            })
+            return base_result
+        else:
+            # 链路失败，note 里记录失败原因（不影响降级）
+            base_result['pipeline_status'] = 'failed'
+            base_result['pipeline_stage'] = pipeline.get('stage', '')
+            base_result['pipeline_error'] = pipeline.get('error', '')
+
+    # 路径 2：降级（v2.5 行为）
+    note_parts = [
+        '⚠️ 小红书需要登录态才能获取内容。'
+        '沙箱 / 无 cookie 环境只能拿到 item_id，无法获取笔记文字/图片/视频元数据。',
+    ]
+    if base_result.get('pipeline_stage'):
+        note_parts.append(
+            f'**视频 CDN→ASR 链路尝试失败**（stage=`{base_result["pipeline_stage"]}`，'
+            f'error=`{base_result.get("pipeline_error", "")[:120]}`）。'
+        )
+    note_parts.append(
+        '**建议：复制笔记标题到 WebSearch 搜索，用 defuddle 抓取第三方报道补充内容。**'
+    )
+    if not item_id:
+        note_parts.insert(0, '⚠️ 无法解析小红书 item_id（短链可能需要先在微信内打开一次）。')
+
+    base_result['note'] = '\n'.join(note_parts)
+    return base_result
 
 
 # ============================================================
@@ -1572,6 +1983,18 @@ def _build_context_for_source(data: dict) -> dict:
         'like_count': data.get('like_count', 0) or 0,
         'description': data.get('description', '') or data.get('desc', '') or '',
         'partial': data.get('partial', False),
+        # XHS v2.6 视频 CDN→ASR 链路专用字段
+        'transcript': data.get('transcript', '') or '',
+        'transcript_segments': data.get('transcript_segments', []) or [],
+        'cover': data.get('cover', '') or data.get('cover_url', '') or '',
+        'cover_url': data.get('cover_url', '') or '',
+        'video_url': data.get('video_url', '') or '',
+        'author_uid': data.get('author_uid', '') or '',
+        'item_url_with_token': data.get('item_url_with_token', '') or '',
+        'pipeline_status': data.get('pipeline_status', '') or '',
+        'pipeline_stage': data.get('pipeline_stage', '') or '',
+        'pipeline_error': data.get('pipeline_error', '') or '',
+        'pipeline_files': data.get('pipeline_files', {}) or {},
     }
 
 

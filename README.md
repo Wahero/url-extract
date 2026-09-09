@@ -1,8 +1,8 @@
 # URL Extract — 通用内容精华抽取
 
-> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.5.2：支持 7 种来源（新增 YouTube / 小红书 / 抖音）、B 站风控缓解（tenacity 重试 + wbi 签名 + SESSDATA cookie）、IMA API tenacity 重试、工程化重构（异常化错误处理 / lazy init / URL 验证 / 类型注解 / 130 个单元测试）。**
+> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.6：XHS 视频笔记自动走 CDN→ASR 抽取完整转写（无需登录）+ 7 来源 + B 站风控缓解 + IMA API tenacity 重试 + 工程化重构 + 147 个单元测试。**
 
-[![Tests](https://img.shields.io/badge/tests-130%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-147%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -11,17 +11,11 @@
 
 > ⚠️ **重要声明 — 请务必阅读**
 >
-> **本版本（v2.5.2）为学术测试版（Academic Preview），请勿用于生产环境。**
+> **本版本（v2.6）为学术测试版（Academic Preview），请勿用于生产环境。**
 >
-> 当视频无字幕时，文档中的部分内容系从社区中相同或相似标题的公开资料处获取并整合而成，**并非直接由视频本身的音频或画面提取**。这意味着：
+> v2.6 新增小红书视频笔记 CDN→ASR 自动抽取，**转写文本来自 Apple Speech 离线 STT**，已经人工核对修正医学术语，但难免有错漏。**医学/法律等专业内容请以原视频及专业人士面诊为准。**
 >
-> - 部分要点可能来自社区作者的二次解读，而非视频创作者的原话
-> - 视频中独有的演示画面、语气强调、即兴发挥等内容无法被覆盖
-> - 文档的结构化呈现可能掩盖内容可信度的局限性
->
-> 待 v2.6 版本（含音频转录层）发布后，此限制将被大幅改善。
->
-> **如需用于正式参考、引用或决策，请务必对照原始视频核实。**
+> 当其它来源无字幕/无正文时，文档中的部分内容系从社区中相同或相似标题的公开资料处获取并整合而成，**并非直接由视频本身的音频或画面提取**。
 
 ---
 
@@ -37,7 +31,7 @@
 |---|---|---|
 | **B站视频** | `https://b23.tv/xxx` | 公开 API（视频信息 / 标签 / 字幕 / 评论）；支持 SESSDATA cookie + wbi 签名 + tenacity 风控重试 |
 | **YouTube 视频** | `https://youtu.be/xxx` | yt-dlp dump-json + 字幕（推荐装 yt-dlp）；无 yt-dlp 时降级到 noembed.com 公开代理 |
-| **小红书笔记** | `https://xiaohongshu.com/discovery/item/xxx` | 短链重定向链解析 item_id（无登录态只能拿到元信息，标记 partial） |
+| **小红书笔记** | `https://xiaohongshu.com/discovery/item/xxx` | **v2.6**：视频笔记自动 CDN→ASR 完整转写（无需登录）；图文笔记降级到 item_id |
 | **抖音视频** | `https://douyin.com/video/xxx` | 长链直接解析 video_id（无签名只能拿到元信息，标记 partial） |
 | **GitHub 仓库** | `https://github.com/user/repo` | gh CLI → REST API → defuddle 三级降级 |
 | **腾讯微视** | `https://weishi.qq.com/xxx` | 微信 UA 模拟 + 公开报道搜索补充 |
@@ -50,14 +44,37 @@
 ```
 B站：     API + Cookie + wbi 签名 → tenacity 重试（风控 1s/2s/4s）→ 社区文章搜索
 YouTube： yt-dlp (dump-json + 写自动字幕) → noembed.com 公开代理
-小红书：  重定向链解析 item_id → WebSearch 补充内容
+小红书：  视频笔记：CDN→ASR（v2.6 无需登录）→ item_id 元信息；图文笔记：item_id 元信息
 抖音：    长链直接解析 video_id → WebSearch 补充内容
 GitHub：  gh CLI → REST API → defuddle 抓 README
 微视：    微信 UA 模拟 → 公开报道搜索
 网页：    defuddle → requests meta → 用户手动补
 ```
 
-## IMA 知识库集成（v2.2+，v2.5.2 强化）
+### 🎬 小红书视频抽取（v2.6 新能力）
+
+短链 `xhslink.cn/o/xxx` 自动走完整抽取链路，**无需登录账号**：
+
+```
+xhslink.cn 短链
+  ↓ curl 重定向 (iPhone Safari UA)
+oia.xiaohongshu.com/oia?deeplink=... (iOS App 路径)
+  或 SPA HTML 内嵌 __INITIAL_STATE__ (Web 路径)
+  ↓ _parse_xhs_deeplink() 抽 h264/h265 master_url + 封面 + 作者 UID
+下载 .mp4 (h264 优先，h265 兜底，限 100MB)
+  ↓ ffmpeg 抽 wav (16kHz 单声道)
+apple-speech transcribe --language zh-CN
+  ↓ STT 转写
+完整转写文本 + 时间分段 + 封面 + 元数据
+```
+
+依赖：`ffmpeg` + `apple-speech`（macOS 14+ / iOS 17+ 自带）。任一缺失时静默降级到 `partial=True` + `pipeline_status='failed'`。
+
+控制开关（env var）：
+- `XHS_VIDEO_CDN=0`：关闭视频链路
+- `XHS_ASR_ON_DEVICE=1`：强制 on-device STT（默认 server-side，质量高完整）
+
+## IMA 知识库集成（v2.2+，v2.5.2/v2.6 强化）
 
 抽取完成后可一键导入 IMA 知识库。**凭证通过环境变量传递，不写入文件、不持久化存储。**
 
@@ -91,7 +108,7 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 | `--ima-raw-md <FILE>` | 配合 `--ima-raw` 使用，指定外部 Markdown 文件 | 优先上传 agent 生成的高质量精华文档 |
 | `--upload-ima` | URL 导入（import_urls） | 原始网址链接 |
 
-### IMA v2.5.2 强化（issue #5 + PR #15）
+### IMA v2.5.2/v2.6 强化（issue #5 + PR #15 + PR #19）
 
 - `api_call()` 加 tenacity 重试：网络错误 / HTTP 5xx 自动重试 3 次（指数退避 1s/2s/4s）
 - 业务错误（HTTP 4xx / code != 0）抛 `ImaAPIBusinessError`，**不重试**
@@ -183,8 +200,8 @@ python3 extract.py "https://b23.tv/xxx" -o result.json
 
 ```
 url-extract/
-├── extract.py                # 主入口脚本（v2.5.2：7 来源 + B站风控 + lazy init + 类型注解）
-├── ima_client.py             # IMA OpenAPI 客户端 v1.4（tenacity 重试 + 类型注解 + ETag 判定）
+├── extract.py                # 主入口脚本（v2.6：XHS 视频 CDN→ASR + 7 来源 + B站风控 + 类型注解）
+├── ima_client.py             # IMA OpenAPI 客户端 v1.5（tenacity 重试 + 完整读/写 API）
 ├── setup.py                  # IMA 凭证引导（交互式）
 ├── SKILL.md                  # AI Skill 定义（7 来源 + 触发词）
 ├── README.md                 # 本文件
@@ -201,12 +218,13 @@ url-extract/
 │   ├── youtube.md.j2
 │   ├── xiaohongshu.md.j2
 │   └── douyin.md.j2
-├── tests/                    # 130 个单元测试
+├── tests/                    # 147 个单元测试
 │   ├── test_bilibili_cookie_retry.py   (24 用例)
-│   ├── test_new_sources.py             (32 用例)
+│   ├── test_new_sources.py             (43 用例，含 XHS v2.6 视频抽取 16 个)
 │   ├── test_ima_client.py              (7 用例)
 │   ├── test_ima_retry.py               (22 用例)
 │   ├── test_cos_sdk_etag.py            (6 用例)
+│   ├── test_defuddle_fix.py            (5 用例)
 │   ├── test_url_validation.py          (17 用例)
 │   ├── test_refactor_13.py             (12 用例)
 │   ├── test_templates.py               (10 用例)
@@ -216,7 +234,7 @@ url-extract/
 
 ## 测试与 CI
 
-- **130 个测试**覆盖：B站风控 / 新来源 / IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染 / 集成
+- **147 个测试**覆盖：B站风控 / 新来源（含 XHS v2.6 视频抽取）/ IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染 / defuddle 修复 / 集成
 - **CI**: GitHub Actions 跑 pytest 矩阵（Python 3.10 / 3.11 / 3.12）
 - **本地跑测试**：
   ```bash
@@ -243,12 +261,14 @@ export IMA_API_RETRY=3               # IMA API 重试次数（默认 3）
 export IMA_API_BACKOFF=1             # 基础退避秒数（默认 1）
 ```
 
-## 已知限制（v2.5.2）
+## 已知限制（v2.6）
 
-- **小红书 / 抖音**：无登录态拿不到正文，只能拿到 item_id/video_id + 元信息（标记 partial=True）
+- **小红书**：图文笔记仍只能拿到 item_id（v2.5 行为）；只有视频笔记能走 CDN→ASR 完整抽取
+- **抖音**：无签名拿不到正文，只能拿到 video_id + 元信息（标记 partial=True）
 - **YouTube 字幕**：依赖 yt-dlp 自动生成的 zh-Hans 字幕，无字幕时无降级
 - **沙箱网络**：YouTube 沙箱网络常不可达，yt-dlp 会失败，自动降级到 noembed.com（仅 title/author/thumbnail）
 - **IMA 业务层错误**：当前 tenacity 只在 api_call 层重试，业务层（find_kb_by_name 等）的双 API 调用还没合并（**待优化**）
+- **小红书 ASR**：依赖 `apple-speech`（macOS 14+ / iOS 17+ 系统工具），其它平台静默降级到 partial=True
 
 ## 贡献
 
