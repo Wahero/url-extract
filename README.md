@@ -10,6 +10,12 @@
 
 `B站` · `YouTube` · `小红书` · `抖音` · `微视` · `GitHub` · `任意网页`
 
+<p align="center">
+  <img src="assets/url-extract-banner.svg" alt="URL Extract — 把「看不完」的内容，变成「读得完」的精华" width="100%">
+</p>
+
+<sub align="center">头图为内置 SMIL 动效的 SVG（无 JS、无外部依赖）。若你的浏览器/GitHub 未播放动画，会静态显示，构图不受影响；静态版见 <a href="assets/url-extract-banner.png">PNG</a>。</sub>
+
 [![Tests](https://img.shields.io/badge/tests-199%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
