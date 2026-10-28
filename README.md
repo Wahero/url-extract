@@ -74,6 +74,7 @@
 | **任意网页** 博客 / 新闻 / 公众号文章 | 去广告去杂讯后的正文精华 |
 
 > 一次贴一条，输出一篇。多个链接也可以依次批量跑。
+> 输出语言可用 `--lang en` 切换为英文（默认中文）。
 
 ### 输出长什么样
 
@@ -96,13 +97,16 @@
 
 **你能拿它做什么：** 直接读 / 存成 Markdown / 丢进知识库 / 交给 AI 继续加工。
 
-### 接上你的知识库（目前支持 IMA）
+### 接上知识库 / 存到本地
 
 | 你想怎么做 | 效果 |
 |---|---|
 | 想要一份**完整的精华文档**存进知识库 | `--ima-raw`：文档以 Markdown 形式上传，结构完整、可搜索 |
 | 想自己先改一改再入库 | `--ima-raw --ima-raw-md ./你的文档.md`：优先上传你的版本 |
 | 只想**记下这条原始链接** | `--upload-ima`：把网址导入指定知识库 |
+| 想存成**本地 Markdown 文件**（不依赖任何云服务） | `--local-out ./out`：结果写入该目录，零依赖、可离线，即使 IMA 不可用也不丢数据 |
+
+> 多个目标可同时生效：例如 `--ima-raw --local-out ./out`，云端与本地各存一份。
 
 **入库准备（只需一次）：** 到 [IMA 开放平台](https://ima.qq.com/agent-interface) 微信扫码登录，拿到 Client ID 与 API Key，设成环境变量即可。**凭证不会写进任何文件、不会留存，会话结束即失效。**
 
@@ -121,12 +125,25 @@ npx skills add Wahero/url-extract
 ```bash
 pip install -r requirements.txt
 
+# 默认中文输出
 python3 extract.py "https://b23.tv/xxx" -o result.json
+
+# 输出英文版文档（适合海外来源或团队）
+python3 extract.py "https://b23.tv/xxx" -o result.json --lang en
+
+# 同时存一份本地 Markdown（不依赖 IMA，离线可用）
+python3 extract.py "https://b23.tv/xxx" -o result.json --local-out ./out
+
+# 只导出单篇 Markdown 文件
+python3 extract.py "https://b23.tv/xxx" -o result.json --md ./note.md
 
 # 一键上传到 IMA 知识库（需先设置凭证）
 export IMA_OPENAPI_CLIENTID="你的ClientID"
 export IMA_OPENAPI_APIKEY="你的APIKey"
 python3 extract.py "https://b23.tv/xxx" -o result.json --ima-raw
+
+# 检查各平台支持状态（依赖是否齐全、接口是否可用）
+python3 extract.py --self-test
 ```
 
 需要的东西不多，主要依赖 Python 3.10+。YouTube 建议额外装 `yt-dlp`，网页正文抽取建议装 `defuddle`。缺了也能跑，只是效果会打折 —— 程序会自动降级，不会直接失败。
@@ -225,6 +242,7 @@ Ten items a day is three hundred a month; six months later all you remember is "
 | **Any web page** blogs / news / articles | Clean body text, ads and noise removed |
 
 > One link in, one article out. Multiple links can be processed in batch, one by one.
+> Output language can be switched to English with `--lang en` (default: Chinese).
 
 ### What the output looks like
 
@@ -247,13 +265,16 @@ A fixed three-part structure — clean, no noise, no format junk:
 
 **What you can do with it:** read it / save as Markdown / feed your knowledge base / hand it to another AI.
 
-### Connect your knowledge base (currently IMA)
+### Connect a knowledge base / save locally
 
 | What you want | How |
 |---|---|
 | Archive the **full digest document** | `--ima-raw`: uploads structured, searchable Markdown |
 | Edit it yourself first | `--ima-raw --ima-raw-md ./your.md`: your version takes priority |
 | Just **remember the link** | `--upload-ima`: imports the URL into a chosen knowledge base |
+| Save as a **local Markdown file** (no cloud needed) | `--local-out ./out`: writes results to that folder — zero-dependency, offline, nothing lost even if IMA is down |
+
+> Multiple targets can combine: e.g. `--ima-raw --local-out ./out` keeps one copy in the cloud and one on disk.
 
 **One-time setup:** sign in at the [IMA Open Platform](https://ima.qq.com/agent-interface) with WeChat, get a Client ID and API Key, and set them as environment variables. **Credentials are never written to any file and never persisted — they expire when the session ends.**
 
@@ -272,12 +293,25 @@ npx skills add Wahero/url-extract
 ```bash
 pip install -r requirements.txt
 
+# Default output is Chinese
 python3 extract.py "https://b23.tv/xxx" -o result.json
+
+# Output an English document (handy for overseas sources or teams)
+python3 extract.py "https://b23.tv/xxx" -o result.json --lang en
+
+# Also save a local Markdown copy (no IMA needed, works offline)
+python3 extract.py "https://b23.tv/xxx" -o result.json --local-out ./out
+
+# Export a single Markdown file only
+python3 extract.py "https://b23.tv/xxx" -o result.json --md ./note.md
 
 # One-click upload to IMA (set credentials first)
 export IMA_OPENAPI_CLIENTID="your-client-id"
 export IMA_OPENAPI_APIKEY="your-api-key"
 python3 extract.py "https://b23.tv/xxx" -o result.json --ima-raw
+
+# Check support status per platform (deps present? endpoints reachable?)
+python3 extract.py --self-test
 ```
 
 Requirements are light: Python 3.10+. `yt-dlp` is recommended for YouTube, `defuddle` for web page extraction. Everything degrades gracefully — missing extras won't break the run, just reduce quality.
