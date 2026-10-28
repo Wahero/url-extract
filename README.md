@@ -14,7 +14,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.6.2-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.6.3-blue)](CHANGELOG.md)
 
 **[简体中文](#-简体中文) · [English](#-english)**
 
@@ -35,10 +35,10 @@
 - 深夜躺在床上，屏幕亮得刺眼，但你真的还想再看一个小时的视频吗
 - 想快速判断一个 GitHub 项目值不值得用，结果在读了一堆安装说明
 
-**URL Extract 只做一件事：把任何一条链接，变成一篇可以直接阅读、可以直接存档的精华文字。**
+**URL Extract 只做一件事：把任何一条链接，变成一篇可以直接阅读、可以直接存档的结构化文字（含完整字幕 / 正文转录，外加概览、评论要点与参考资料）。**
 
-不是逐字稿，不是机器翻译，不是一堆原始字幕堆砌。
-是经过整理、分节、带概览的结构化文字 —— 你打开就能读完，读完就懂。
+它给你的是**带元数据的完整字幕 / 正文转录** —— 整理过、能搜索、可存档；但**不是**由 AI 重新概括的"精简摘要"。
+如果你要的是"浓缩成几条要点"，那是可选的后续步骤（交给宿主 AI 处理，或等待后续 Premium 版的可选精炼功能）。
 
 ### 三种用法，看你当下的处境
 
@@ -81,8 +81,8 @@
 ## 一、概览
     一眼看懂这篇文章/这条视频在讲什么（含关键数据表）
 
-## 二、精华内容
-    分小节整理的核心信息，不再是散乱的逐字稿
+## 二、完整字幕（转录）
+    视频的完整字幕文本，按原文呈现，不再需要边看边记
 
 ## 三、参考资料
     所有来源链接，方便你回去核对原文
@@ -134,8 +134,9 @@ python3 extract.py "https://b23.tv/xxx" -o result.json --ima-raw
 | **小红书图文笔记** | 正文抽取仍然有限，目前主要能拿到基础信息；**视频笔记**才能完整转写 |
 | **抖音** | 没有签名的情况下拿不到完整正文，只能给出基础信息并标注"内容不完整" |
 | **YouTube 字幕** | 依赖自动生成的中文字幕；**完全没有字幕时无法转写** |
-| **小红书语音转写** | 依赖系统级语音识别能力（macOS 14+ / iOS 17+）；其它系统上会自动降级，只给基础信息 |
+| **小红书语音转写** | macOS / iOS 走 Apple Speech；**Windows / Linux 需自行安装 ffmpeg + openai-whisper（或 whisper.cpp）** 才能启用完整转写，否则仅返回基础信息 |
 | **语音转写本身** | 机器识别，难免有错字漏字。**医学、法律、金融等专业内容，请务必回看原视频或咨询专业人士** |
+| **内容精炼 / 摘要** | 当前版本**输出完整字幕 / 正文，不做 AI 摘要**；如需浓缩要点，请用宿主 AI 处理，或等待后续 Premium 版的可选精炼功能 |
 | **内容来源** | 当某条链接本身无字幕、无正文时，部分内容会由公开资料整合而来，**并非全部来自原视频的音频或画面** —— 需要精确引用时请核对原文 |
 
 一句话：**它是一把很好的"省时间"工具，不是"替代原始信息"的工具。**
@@ -179,8 +180,8 @@ How much of your day gets eaten by content you "feel you should watch"?
 
 **URL Extract does exactly one thing: turn any link into clean, structured, archivable text.**
 
-Not a raw transcript. Not machine translation. Not a pile of subtitles.
-A structured article — organized, sectioned, with an overview — ready to read the moment it arrives.
+Not a one-line summary. Not machine translation. What you get is the **full transcript plus metadata** — organized, sectioned, with an overview — ready to read the moment it arrives.
+It does **not** re-summarize the content with AI. If you want condensed bullet points, that is an optional next step (hand it to your host AI, or wait for the optional refinement feature in a future Premium version).
 
 ### Three ways to use it
 
@@ -223,8 +224,8 @@ A fixed three-part structure — clean, no noise, no format junk:
 ## 1. Overview
     What this is about at a glance (with key data table)
 
-## 2. Key Content
-    Core information organized into sections — not a messy transcript
+## 2. Full Transcript
+    The video's complete subtitle text, presented verbatim — no need to watch and take notes
 
 ## 3. References
     All source links, so you can verify against the original
@@ -276,8 +277,9 @@ We'd rather tell you now than have you find out later.
 | **Xiaohongshu image-text notes** | Text extraction is limited; mostly basic info. Only **video notes** get full transcription |
 | **Douyin** | Without request signing, only the video ID and basic info — marked as "partial" |
 | **YouTube subtitles** | Depends on auto-generated Chinese subtitles; **no subtitles = no transcript** |
-| **Xiaohongshu speech-to-text** | Requires system-level speech recognition (macOS 14+ / iOS 17+); other platforms degrade to basic info |
+| **Xiaohongshu speech-to-text** | macOS / iOS use Apple Speech; **Windows / Linux require ffmpeg + openai-whisper (or whisper.cpp)** to enable full transcription, otherwise only basic info is returned |
 | **Transcription accuracy** | Machine ASR inevitably has errors. **For medical, legal, or financial content, always check the original video or consult a professional** |
+| **Summarization / refinement** | The current version outputs the **full transcript / body text, without AI summarization**. For condensed bullet points, use your host AI, or wait for the optional refinement feature in a future Premium version. |
 | **Content sourcing** | When a link has no subtitles or body text, parts of the digest are compiled from public sources — **not all from the video's own audio or visuals**. Verify against the original before precise citation |
 
 In one sentence: **this is a great time-saving tool, not a replacement for the original content.**

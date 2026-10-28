@@ -129,3 +129,28 @@ def test_templates_dir_exists():
     assert tpl_dir.is_dir(), f"templates 目录不存在: {tpl_dir}"
     for name in ("bilibili", "github", "webpage", "weishi"):
         assert (tpl_dir / f"{name}.md.j2").is_file(), f"缺少模板 {name}.md.j2"
+
+
+def test_en_template_renders():
+    """lang=en 时渲染英文模板，且中文模板默认输出不变。"""
+    data = _load("bilibili_with_subtitle.json")
+    # 默认 zh
+    md_zh = extract._build_markdown_content(data)
+    assert "视频字幕" in md_zh
+    # en
+    data_en = dict(data)
+    data_en["lang"] = "en"
+    md_en = extract._build_markdown_content(data_en)
+    assert "Video Subtitles" in md_en, "英文模板必须出现 Video Subtitles"
+    assert "References" in md_en, "英文模板必须出现 References"
+    assert "视频字幕" not in md_en, "英文模板不应出现中文小节标题"
+
+
+def test_en_template_for_all_sources():
+    """所有 source 的英文模板都能渲染且不抛异常、不为空。"""
+    for src in ("bilibili", "github", "webpage", "weishi", "youtube", "xiaohongshu", "douyin"):
+        data = {"source": src, "title": "t", "url": "https://example.com",
+                "version": "2.6.2", "lang": "en"}
+        ctx = extract._build_context_for_source(data)
+        md = extract._render_template(src, ctx)
+        assert isinstance(md, str) and md.strip(), f"{src} en 渲染为空"
