@@ -1,278 +1,309 @@
-# URL Extract — 通用内容精华抽取
+<div align="center">
 
-> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.6.2：可 `pip install` 的套件化（templates 隨包附帶）+ Windows 測試通過 + 暫存自動清理 + 199 測試覆蓋**。**v2.6.1：跨平台 ASR 后端（apple-speech → whisper → google-cloud）+ 全平台兼容**。**v2.6：XHS 视频笔记自动走 CDN→ASR 抽取完整转写（无需登录）+ 7 来源 + B 站风控缓解 + IMA API tenacity 重试 + 工程化重构。**
+# URL Extract
+
+### 把「看不完」的内容，变成「读得完」的精华
+### Turn "too much to watch" into "quick to read"
+
+不用再花 40 分钟看一条 8 分钟就能读完的视频。
+贴一条链接，拿回一篇干净、有结构、能存档的文字。
+
+`B站` · `YouTube` · `小红书` · `抖音` · `微视` · `GitHub` · `任意网页`
 
 [![Tests](https://img.shields.io/badge/tests-199%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.6.2-blue)](CHANGELOG.md)
+
+**[简体中文](#-简体中文) · [English](#-english)**
+
+</div>
 
 ---
 
-> ⚠️ **重要声明 — 请务必阅读**
->
-> **本版本（v2.6）为学术测试版（Academic Preview），请勿用于生产环境。**
->
-> v2.6 新增小红书视频笔记 CDN→ASR 自动抽取，**转写文本来自 Apple Speech（默认 server-side STT）**，难免有错漏。**医学/法律等专业内容请以原视频及专业人士面诊为准。**
->
-> 当其它来源无字幕/无正文时，文档中的部分内容系从社区中相同或相似标题的公开资料处获取并整合而成，**并非直接由视频本身的音频或画面提取**。
+<a id="-简体中文"></a>
 
----
+## 🇨🇳 简体中文
 
-## 为什么需要它？
+### 这是什么？
 
-外面太多资源——B站视频、YouTube、小红书、抖音、GitHub 仓库、一般博客、微信公众号链接——混杂着大量无关痛痒的信息。有时候深夜躺在床上不适合看视频，有时候只想快速了解一个仓库做了什么，有时候被标题吸引进去却发现全是废话。
+你的一天，有多少时间被"无聊但好像该看"的内容吃掉了？
 
-**URL Extract 做的就是一件事：把任何链接变成一篇干净、结构化的精华文章。**
+- 通勤时刷到的 30 分钟播客视频，其实核心就 5 条结论
+- 收藏夹里 200 条小红书，想说"以后再看"，从此再也没打开
+- 深夜躺在床上，屏幕亮得刺眼，但你真的还想再看一个小时的视频吗
+- 想快速判断一个 GitHub 项目值不值得用，结果在读了一堆安装说明
 
-## 支持来源（7 种）
+**URL Extract 只做一件事：把任何一条链接，变成一篇可以直接阅读、可以直接存档的精华文字。**
 
-| 来源 | 示例 | 处理方式 |
-|---|---|---|
-| **B站视频** | `https://b23.tv/xxx` | 公开 API（视频信息 / 标签 / 字幕 / 评论）；支持 SESSDATA cookie + wbi 签名 + tenacity 风控重试 |
-| **YouTube 视频** | `https://youtu.be/xxx` | yt-dlp dump-json + 字幕（推荐装 yt-dlp）；无 yt-dlp 时降级到 noembed.com 公开代理 |
-| **小红书笔记** | `https://xiaohongshu.com/discovery/item/xxx` | **v2.6**：视频笔记自动 CDN→ASR 完整转写（无需登录）；图文笔记降级到 item_id |
-| **抖音视频** | `https://douyin.com/video/xxx` | 长链直接解析 video_id（无签名只能拿到元信息，标记 partial） |
-| **GitHub 仓库** | `https://github.com/user/repo` | gh CLI → REST API → defuddle 三级降级 |
-| **腾讯微视** | `https://weishi.qq.com/xxx` | 微信 UA 模拟 + 公开报道搜索补充 |
-| **一般网页** | 小红书 / 博客 / 新闻等 | defuddle 本地提取（无 defuddle 时降级到 requests meta 提取） |
+不是逐字稿，不是机器翻译，不是一堆原始字幕堆砌。
+是经过整理、分节、带概览的结构化文字 —— 你打开就能读完，读完就懂。
 
-## 核心设计：多级降级
+### 三种用法，看你当下的处境
 
-不依赖单一数据源。当首选方式不可用时，自动降级：
+#### 🌙 现在不方便看视频
 
-```
-B站：     API + Cookie + wbi 签名 → tenacity 重试（风控 1s/2s/4s）→ 社区文章搜索
-YouTube： yt-dlp (dump-json + 写自动字幕) → noembed.com 公开代理
-小红书：  视频笔记：CDN→ASR（v2.6 无需登录）→ item_id 元信息；图文笔记：item_id 元信息
-抖音：    长链直接解析 video_id → WebSearch 补充内容
-GitHub：  gh CLI → REST API → defuddle 抓 README
-微视：    微信 UA 模拟 → 公开报道搜索
-网页：    defuddle → requests meta → 用户手动补
-```
+在地铁上、在被窝里、在开会前的五分钟。把链接丢进去，几分钟后拿回一篇能直接读的精华。**眼睛比耳朵自由** —— 可以扫读、可以回看、可以在任何一秒钟停下。
 
-### 🎬 小红书视频抽取（v2.6 新能力）
+#### 📌 这条内容很好，但今天没时间
 
-短链 `xhslink.cn/o/xxx` 自动走完整抽取链路，**无需登录账号**：
+一键抽取 → 存成文字 → 躺进你的知识库。**好东西不漏，时间不挤。**
 
-```
-xhslink.cn 短链
-  ↓ curl 重定向 (iPhone Safari UA)
-oia.xiaohongshu.com/oia?deeplink=... (iOS App 路径)
-  或 SPA HTML 内嵌 __INITIAL_STATE__ (Web 路径)
-  ↓ _parse_xhs_deeplink() 抽 h264/h265 master_url + 封面 + 作者 UID
-下载 .mp4 (h264 优先，h265 兜底，限 100MB)
-  ↓ ffmpeg 抽 wav (16kHz 单声道)
-apple-speech transcribe --language zh-CN
-  ↓ STT 转写
-完整转写文本 + 时间分段 + 封面 + 元数据
-```
+#### 🗂 我要的是一份能搜索的资料库
 
-依赖：`ffmpeg` + `apple-speech`（macOS 14+ / iOS 17+ 自带）。任一缺失时静默降级到 `partial=True` + `pipeline_status='failed'`。
+一天看十条，一个月就是三百条，半年后你只会记得"好像看过"。抽成文字后可以直接归档（目前支持 **IMA 知识库**一键入库），从此**可以被搜到、被引用、被整理**，而不是消失在收藏夹深处。
 
-控制开关（env var）：
-- `XHS_VIDEO_CDN=0`：关闭视频链路
-- `XHS_ASR_ON_DEVICE=1`：强制 on-device STT（默认 server-side，质量高完整）
+### 它支持什么
 
-## IMA 知识库集成（v2.2+，v2.5.2/v2.6 强化）
+| 你手上的链接 | 你会拿到 |
+|---|---|
+| **B 站视频** `b23.tv/xxx` | 视频概览 + 字幕内容整理 + 标签与评论要点 |
+| **YouTube** `youtu.be/xxx` | 完整字幕 + 播放量 / 点赞 / 时长 / 发布日期 |
+| **小红书** 视频笔记 | **完整语音转写** + 分段 + 封面 + 作者信息（无需登录） |
+| **小红书** 图文笔记 | 基础信息（正文抽取仍有限，见下方诚实说明） |
+| **抖音** `douyin.com/video/xxx` | 视频 ID 与基础信息，正文可能不完整 |
+| **腾讯微视** | 基础信息 + 公开报道补充 |
+| **GitHub 仓库** | 这个项目到底是做什么的、值不值得用 |
+| **任意网页** 博客 / 新闻 / 公众号文章 | 去广告去杂讯后的正文精华 |
 
-抽取完成后可一键导入 IMA 知识库。**凭证通过环境变量传递，不写入文件、不持久化存储。**
+> 一次贴一条，输出一篇。多个链接也可以依次批量跑。
 
-```bash
-# 1. 设置凭证（每次会话需重新设置）
-export IMA_OPENAPI_CLIENTID="你的ClientID"
-export IMA_OPENAPI_APIKEY="你的APIKey"
+### 输出长什么样
 
-# 2. 抽取 + 上传 Markdown 到 RAW 知识库
-python3 extract.py "https://b23.tv/xxx" --output result.json --ima-raw
-
-# 3. 或导入到指定知识库（URL 导入）
-python3 extract.py "https://example.com/article" --output result.json --upload-ima --ima-kb "我的知识库"
-
-# 4. 使用外部 Markdown 文件上传到 RAW（v2.5 新增）
-python3 extract.py "https://b23.tv/xxx" --output result.json --ima-raw --ima-raw-md "./精华文档.md"
-
-# 5. B站风控缓解（生产环境推荐）
-python3 extract.py "https://b23.tv/xxx" --output result.json \
-    --sessdata "你的SESSDATA" --wbi-sign on
-
-# 6. 或仅抽取（不导入 IMA）
-python3 extract.py "https://b23.tv/xxx" --output result.json
-```
-
-### `--ima-raw` 与 `--upload-ima` 的区别
-
-| 参数 | 导入方式 | 内容 |
-|---|---|---|
-| `--ima-raw` | 上传 Markdown 文件（四步流程：create_media → COS → add_knowledge） | 完整精华 Markdown 文档（v2.5 来源感知结构化输出） |
-| `--ima-raw-md <FILE>` | 配合 `--ima-raw` 使用，指定外部 Markdown 文件 | 优先上传 agent 生成的高质量精华文档 |
-| `--upload-ima` | URL 导入（import_urls） | 原始网址链接 |
-
-### IMA v2.5.2/v2.6 强化（issue #5 + PR #15 + PR #19）
-
-- `api_call()` 加 tenacity 重试：网络错误 / HTTP 5xx 自动重试 3 次（指数退避 1s/2s/4s）
-- 业务错误（HTTP 4xx / code != 0）抛 `ImaAPIBusinessError`，**不重试**
-- 通过环境变量 `IMA_API_RETRY` / `IMA_API_BACKOFF` 可调
-- `_cos_upload_sdk` 修复：不再传 `ContentLength`（int 触发问题），用 `ETag` 判定成功
-- COS 上传「SDK 优先 + Legacy 兜底」（`_cos_upload(prefer='auto')`），强烈推荐 `pip install cos-python-sdk-v5`
-
-## 输出格式
-
-干净 Markdown，无 YAML frontmatter，无 HTML meta 标签。结构：
+固定三段式，干净、没有噪音、没有乱七八糟的格式标记：
 
 ```markdown
 # 标题
 
-> 来源信息
+> 来源 · 作者 · 时长 · 发布时间
 
 ## 一、概览
-（结构化数据表格）
+    一眼看懂这篇文章/这条视频在讲什么（含关键数据表）
 
 ## 二、精华内容
-（分小节呈现核心信息）
+    分小节整理的核心信息，不再是散乱的逐字稿
 
 ## 三、参考资料
-（所有来源链接）
+    所有来源链接，方便你回去核对原文
 ```
 
-## 安装与使用
+**你能拿它做什么：** 直接读 / 存成 Markdown / 丢进知识库 / 交给 AI 继续加工。
 
-### 作为 AI Skill 使用
+### 接上你的知识库（目前支持 IMA）
 
-将此仓库的 `SKILL.md` 安装到你的 AI 编程助手（Claude Code、Codex、Hermes AI 等）：
+| 你想怎么做 | 效果 |
+|---|---|
+| 想要一份**完整的精华文档**存进知识库 | `--ima-raw`：文档以 Markdown 形式上传，结构完整、可搜索 |
+| 想自己先改一改再入库 | `--ima-raw --ima-raw-md ./你的文档.md`：优先上传你的版本 |
+| 只想**记下这条原始链接** | `--upload-ima`：把网址导入指定知识库 |
+
+**入库准备（只需一次）：** 到 [IMA 开放平台](https://ima.qq.com/agent-interface) 微信扫码登录，拿到 Client ID 与 API Key，设成环境变量即可。**凭证不会写进任何文件、不会留存，会话结束即失效。**
+
+### 怎么用起来？
+
+**方式一：作为 AI 技能安装（推荐）**
+
+如果你用 AI 编程助手（Claude Code、Codex 等），它可以作为一项技能直接装上，之后你只需要说一句"帮我把这个链接变精华"：
 
 ```bash
 npx skills add Wahero/url-extract
 ```
 
-### 作为独立脚本使用
-
-**Python 依赖**（3 个必需 + 3 个可选）：
+**方式二：作为独立命令行工具**
 
 ```bash
-# 必需
-pip install requests beautifulsoup4 jinja2
-
-# 可选（强烈推荐）
-pip install tenacity           # 重试（B站风控 + IMA API）
-pip install cos-python-sdk-v5  # IMA COS 上传 SDK 优先
-pip install yt-dlp              # YouTube 元数据 + 字幕
-
-# 全部装
 pip install -r requirements.txt
-```
 
-**Node.js 依赖**（1 个可选但推荐）：
-
-```bash
-npm i -g defuddle  # 一般网页提取（脚本也支持自动探测 npx）
-```
-
-**运行**：
-
-```bash
 python3 extract.py "https://b23.tv/xxx" -o result.json
+
+# 一键上传到 IMA 知识库（需先设置凭证）
+export IMA_OPENAPI_CLIENTID="你的ClientID"
+export IMA_OPENAPI_APIKEY="你的APIKey"
+python3 extract.py "https://b23.tv/xxx" -o result.json --ima-raw
 ```
 
-### IMA 凭证获取
+需要的东西不多，主要依赖 Python 3.10+。YouTube 建议额外装 `yt-dlp`，网页正文抽取建议装 `defuddle`。缺了也能跑，只是效果会打折 —— 程序会自动降级，不会直接失败。
 
-1. 打开 <https://ima.qq.com/agent-interface>
-2. 微信扫码登录
-3. 页面显示 **Client ID**（自动生成）
-4. 点击「获取 API Key」按钮生成 **API Key**（与 Client ID 不同）
-5. 设置环境变量：
-   ```bash
-   export IMA_OPENAPI_CLIENTID="你的ClientID"
-   export IMA_OPENAPI_APIKEY="你的APIKey"
-   ```
+### 诚实说明：它能做到什么，做不到什么
 
-> **安全说明**：本项目不会将凭证写入任何文件。凭证仅通过环境变量在运行时传递，重启后需重新设置。
+我们不想让你用完才发现"原来不行"。
 
-## 使用场景
+| 情况 | 实际表现 |
+|---|---|
+| **小红书图文笔记** | 正文抽取仍然有限，目前主要能拿到基础信息；**视频笔记**才能完整转写 |
+| **抖音** | 没有签名的情况下拿不到完整正文，只能给出基础信息并标注"内容不完整" |
+| **YouTube 字幕** | 依赖自动生成的中文字幕；**完全没有字幕时无法转写** |
+| **小红书语音转写** | 依赖系统级语音识别能力（macOS 14+ / iOS 17+）；其它系统上会自动降级，只给基础信息 |
+| **语音转写本身** | 机器识别，难免有错字漏字。**医学、法律、金融等专业内容，请务必回看原视频或咨询专业人士** |
+| **内容来源** | 当某条链接本身无字幕、无正文时，部分内容会由公开资料整合而来，**并非全部来自原视频的音频或画面** —— 需要精确引用时请核对原文 |
 
-- 🌙 **深夜阅读**：把 B 站视频变成文字精华，躺着看
-- 📺 **YouTube 摘要**：用 yt-dlp 拿完整字幕 + 元数据（view / like / duration / upload_date）
-- 📊 **小红书 / 抖音 调研**：拿到 item_id 后 WebSearch 补内容
-- 🔍 **仓库调研**：快速了解一个 GitHub 项目是做什么的
-- 📰 **新闻聚合**：把多篇文章链接批量转为精华摘要
+一句话：**它是一把很好的"省时间"工具，不是"替代原始信息"的工具。**
 
-## 项目结构
+### 许可与商用（License & Commercial）
 
+- 本仓库的**开源版本**以 [**MIT License**](LICENSE) 发布（SPDX: `MIT`），免费使用、修改、分发，只需保留版权与许可声明。
+- **第三方付费包与高级版本**（如将来在 Agensi.io 等市场上架的 Premium Pack）以**独立的商业许可**发布，不属于本 MIT 开源仓库的一部分。
+- 项目名称 "URL Extract" 与相关标识不随 MIT 许可授权，未经授权不得用于衍生项目的宣传或冒充官方。
+- 本项目与 B 站、YouTube、小红书、抖音、腾讯等平台**无任何隶属或合作关系**，请遵守各平台服务条款，仅将本工具用于**个人学习与研究**，尊重原作者版权。
+- 问题反馈与安全漏洞报告：请通过 [GitHub Issues](https://github.com/Wahero/url-extract/issues) 提交。
+
+### 声明
+
+- 当前版本为**学术测试版（Academic Preview）**，不建议用于生产环境或关键业务。
+- 抽取质量受原内容质量影响很大 —— 原视频本身水分多，抽出来也只能是"浓缩的水"。
+
+---
+
+<div align="center">
+
+**把时间还给自己。**
+内容看不完，不代表你要看完全部。
+
+</div>
+
+---
+
+<a id="-english"></a>
+
+## 🇬🇧 English
+
+### What is this?
+
+How much of your day gets eaten by content you "feel you should watch"?
+
+- A 30-minute podcast video from your commute that really has just 5 takeaways
+- 200 saved Xiaohongshu posts marked "read later" — never opened again
+- Lying in bed at night, screen too bright, wondering if you really want another hour of video
+- Trying to judge whether a GitHub repo is worth using, and getting stuck in install docs
+
+**URL Extract does exactly one thing: turn any link into clean, structured, archivable text.**
+
+Not a raw transcript. Not machine translation. Not a pile of subtitles.
+A structured article — organized, sectioned, with an overview — ready to read the moment it arrives.
+
+### Three ways to use it
+
+#### 🌙 When you can't watch a video right now
+
+On the subway, in bed, five minutes before a meeting. Drop in a link, get back a readable digest in minutes. **Your eyes are freer than your ears** — skim, re-read, pause at any second.
+
+#### 📌 Great content, but no time today
+
+Extract → save as text → straight into your knowledge base. **Nothing gets lost, no time gets squeezed.**
+
+#### 🗂 You want a searchable library
+
+Ten items a day is three hundred a month; six months later all you remember is "I think I saw that." Once extracted, you can archive directly (currently supports one-click upload to the **IMA Knowledge Base**) — searchable, quotable, organized, instead of buried in your bookmarks.
+
+### What it supports
+
+| Your link | What you get |
+|---|---|
+| **Bilibili** `b23.tv/xxx` | Video overview + organized subtitles + tags & comment highlights |
+| **YouTube** `youtu.be/xxx` | Full subtitles + views / likes / duration / publish date |
+| **Xiaohongshu (RED)** video notes | **Full speech-to-text transcript** + segments + cover + author info (no login required) |
+| **Xiaohongshu** image-text notes | Basic info only (text extraction still limited — see honest notes below) |
+| **Douyin** `douyin.com/video/xxx` | Video ID and basic info; full text may be unavailable |
+| **Tencent Weishi** | Basic info + public-report enrichment |
+| **GitHub repos** | What this project actually does, and whether it's worth using |
+| **Any web page** blogs / news / articles | Clean body text, ads and noise removed |
+
+> One link in, one article out. Multiple links can be processed in batch, one by one.
+
+### What the output looks like
+
+A fixed three-part structure — clean, no noise, no format junk:
+
+```markdown
+# Title
+
+> Source · Author · Duration · Published
+
+## 1. Overview
+    What this is about at a glance (with key data table)
+
+## 2. Key Content
+    Core information organized into sections — not a messy transcript
+
+## 3. References
+    All source links, so you can verify against the original
 ```
-url-extract/
-├── url_extract/
-│   ├── extract.py            # 主入口（v2.6：XHS 视频 CDN→ASR + 7 来源 + B站风控 + 类型注解）
-│   ├── ima_client.py         # IMA OpenAPI 客户端 v1.5（tenacity 重试 + 完整读/写 API）
-│   ├── xhs_asr.py            # 小紅書影片 ASR（apple-speech → whisper → google-cloud）
-│   └── templates/            # Markdown 模板（Jinja2，7 個，隨套件打包）
-├── extract.py                # 向後相容入口（等同 url_extract.extract）
-├── ima_client.py             # 向後相容入口
-├── xhs_asr.py                # 向後相容入口
-├── tools/ima_setup.py        # IMA 凭证引导（交互式）
-├── SKILL.md                  # AI Skill 定义（7 来源 + 触发词）
-├── README.md                 # 本文件
-├── CHANGELOG.md              # 完整版本历史
-├── REFACTOR_PROGRESS.md      # 2026-08-07 重构工作汇报
-├── LICENSE                   # MIT
-├── pyproject.toml            # Python 包元数据（templates 隨套件打包）
-├── requirements.txt          # 依赖清单（含可选）
-├── tests/                    # 199 个单元测试
-│   ├── test_bilibili_cookie_retry.py   (24 用例)
-│   ├── test_new_sources.py             (43 用例，含 XHS v2.6 视频抽取 16 个)
-│   ├── test_ima_client.py              (7 用例)
-│   ├── test_ima_retry.py               (22 用例)
-│   ├── test_cos_sdk_etag.py            (6 用例)
-│   ├── test_defuddle_fix.py            (5 用例)
-│   ├── test_url_validation.py          (17 用例)
-│   ├── test_refactor_13.py             (12 用例)
-│   ├── test_templates.py               (10 用例)
-│   └── fixtures/           # 测试固定数据
-└── .github/workflows/test.yml   # GitHub Actions CI（pytest 3.10/3.11/3.12 × Ubuntu/Windows）
-```
-```
 
-## 测试与 CI
+**What you can do with it:** read it / save as Markdown / feed your knowledge base / hand it to another AI.
 
-- **147 个测试**覆盖：B站风控 / 新来源（含 XHS v2.6 视频抽取）/ IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染 / defuddle 修复 / 集成
-- **CI**: GitHub Actions 跑 pytest 矩阵（Python 3.10 / 3.11 / 3.12）
-- **本地跑测试**：
-  ```bash
-  pip install -r requirements.txt
-  python3 -m pytest tests/ -v
-  ```
+### Connect your knowledge base (currently IMA)
 
-## 关键 CLI 参数速查
+| What you want | How |
+|---|---|
+| Archive the **full digest document** | `--ima-raw`: uploads structured, searchable Markdown |
+| Edit it yourself first | `--ima-raw --ima-raw-md ./your.md`: your version takes priority |
+| Just **remember the link** | `--upload-ima`: imports the URL into a chosen knowledge base |
+
+**One-time setup:** sign in at the [IMA Open Platform](https://ima.qq.com/agent-interface) with WeChat, get a Client ID and API Key, and set them as environment variables. **Credentials are never written to any file and never persisted — they expire when the session ends.**
+
+### How to use it
+
+**Option 1: Install as an AI skill (recommended)**
+
+If you use an AI coding assistant (Claude Code, Codex, etc.), install it as a skill and just say "turn this link into a digest":
 
 ```bash
-# 来源相关
-python3 extract.py <URL> -o result.json
-
-# B 站风控（生产推荐）
-python3 extract.py "https://b23.tv/xxx" --sessdata "$BILIBILI_SESSDATA" --wbi-sign on
-
-# IMA 上传
-python3 extract.py <URL> --ima-raw                                    # 上传 Markdown 到 RAW
-python3 extract.py <URL> --ima-raw --ima-raw-md ./精华.md             # 外部 Markdown 优先
-python3 extract.py <URL> --upload-ima --ima-kb "我的知识库"            # URL 导入指定知识库
-
-# IMA API 调优
-export IMA_API_RETRY=3               # IMA API 重试次数（默认 3）
-export IMA_API_BACKOFF=1             # 基础退避秒数（默认 1）
+npx skills add Wahero/url-extract
 ```
 
-## 已知限制（v2.6）
+**Option 2: Run it yourself**
 
-- **小红书**：图文笔记仍只能拿到 item_id（v2.5 行为）；只有视频笔记能走 CDN→ASR 完整抽取
-- **抖音**：无签名拿不到正文，只能拿到 video_id + 元信息（标记 partial=True）
-- **YouTube 字幕**：依赖 yt-dlp 自动生成的 zh-Hans 字幕，无字幕时无降级
-- **沙箱网络**：YouTube 沙箱网络常不可达，yt-dlp 会失败，自动降级到 noembed.com（仅 title/author/thumbnail）
-- **IMA 业务层错误**：当前 tenacity 只在 api_call 层重试，业务层（find_kb_by_name 等）的双 API 调用还没合并（**待优化**）
-- **小红书 ASR**：依赖 `apple-speech`（macOS 14+ / iOS 17+ 系统工具），其它平台静默降级到 partial=True
+```bash
+pip install -r requirements.txt
 
-## 贡献
+python3 extract.py "https://b23.tv/xxx" -o result.json
 
-欢迎贡献新的来源类型支持、更好的降级策略、或任何改进。
+# One-click upload to IMA (set credentials first)
+export IMA_OPENAPI_CLIENTID="your-client-id"
+export IMA_OPENAPI_APIKEY="your-api-key"
+python3 extract.py "https://b23.tv/xxx" -o result.json --ima-raw
+```
 
-## License
+Requirements are light: Python 3.10+. `yt-dlp` is recommended for YouTube, `defuddle` for web page extraction. Everything degrades gracefully — missing extras won't break the run, just reduce quality.
 
-MIT
+### Honest notes: what it can and cannot do
+
+We'd rather tell you now than have you find out later.
+
+| Situation | Actual behavior |
+|---|---|
+| **Xiaohongshu image-text notes** | Text extraction is limited; mostly basic info. Only **video notes** get full transcription |
+| **Douyin** | Without request signing, only the video ID and basic info — marked as "partial" |
+| **YouTube subtitles** | Depends on auto-generated Chinese subtitles; **no subtitles = no transcript** |
+| **Xiaohongshu speech-to-text** | Requires system-level speech recognition (macOS 14+ / iOS 17+); other platforms degrade to basic info |
+| **Transcription accuracy** | Machine ASR inevitably has errors. **For medical, legal, or financial content, always check the original video or consult a professional** |
+| **Content sourcing** | When a link has no subtitles or body text, parts of the digest are compiled from public sources — **not all from the video's own audio or visuals**. Verify against the original before precise citation |
+
+In one sentence: **this is a great time-saving tool, not a replacement for the original content.**
+
+### License & Commercial Use
+
+- The **open-source version** in this repository is released under the [**MIT License**](LICENSE) (SPDX: `MIT`) — free to use, modify, and distribute, provided the copyright and license notice are retained.
+- **Third-party premium packs** (e.g., a future Premium Pack listed on marketplaces like Agensi.io) are distributed under a **separate commercial license** and are not part of this MIT-licensed repository.
+- The name "URL Extract" and related branding are **not** licensed under MIT and may not be used to promote derivative projects or imply official endorsement.
+- This project is **not affiliated with** Bilibili, YouTube, Xiaohongshu, Douyin, Tencent, or any other platform. Please comply with each platform's terms of service, use this tool for **personal learning and research only**, and respect original authors' copyrights.
+- Bug reports and security disclosures: please use [GitHub Issues](https://github.com/Wahero/url-extract/issues).
+
+### Disclaimer
+
+- The current version is an **Academic Preview** — not recommended for production or business-critical use.
+- Output quality depends heavily on the source material — squeeze watery content and you get concentrated water.
+
+---
+
+<div align="center">
+
+**Give your time back to yourself.**
+You don't have to finish everything to have read enough.
+
+</div>
+
+---
+
+<sub>License: MIT · 中文 / English · Feedback and new source support are always welcome · 欢迎提交新的来源支持与改进建议</sub>
