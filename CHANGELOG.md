@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.6.3] — 2026-10-28
+
+### Fixed
+- **关闭运行时自动安装依赖（安全合规）**：移除 `extract.py` 中运行时自动执行 `pip install yt-dlp` 与 `npm i -g defuddle` 的代码，改为缺失时给出明确的手动安装指引并自动降级。依赖改为可选：`pip install url-extract[media]`（yt-dlp）/ `[asr]`（openai-whisper）。
+- **IMA 上传失败不再静默成功**：`--ima-raw` / `--upload-ima` 上传失败时 `main()` 现返回退出码 1，避免自动化误判为成功。
+- **小红书语音转写标识诚实化**：输出模板现按实际 ASR 后端（Apple Speech / Whisper / Google Speech）标注，Windows / Linux 用户能清楚看到走的是本地 Whisper 而非 macOS 专属的 Apple Speech。
+
+### Added
+- **`--lang {zh,en}` 输出语言选项**：新增 7 套英文模板（`*_en.md.j2`），海外用户可生成英文 Markdown 文档（影响 `--md` 输出与 IMA 上传文档）。
+- **`--md PATH` 选项**：额外输出一份 Markdown 文档到指定路径，内容受 `--lang` 影响。
+
+### Docs
+- README 诚实化：明确本项目输出的是「完整字幕 / 正文转录 + 元数据」，**不是 AI 摘要**；并补充 Windows / Linux 启用小红书完整转写所需的 ffmpeg + openai-whisper 安装说明。
+
 ## [2.6.2] — 2026-10-28
 
 ### Fixed

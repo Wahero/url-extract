@@ -1,6 +1,6 @@
 [project]
 name = "url-extract"
-version = "2.6.2"
+version = "2.6.3"
 description = "通用内容精华抽取 — 把 B 站视频、GitHub 仓库、一般网页、微视链接变成结构化 Markdown，可选上传到 IMA 知识库"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,10 @@ dev = [
     "pytest-cov>=4.0",
     "responses>=0.23",
 ]
+# 可选：YouTube 元数据/字幕抽取（不装则自动降级到 noembed 公开代理）
+media = ["yt-dlp>=2024.1"]
+# 可选：本地语音识别（Windows / Linux 启用小红书视频完整转写需要）
+asr = ["openai-whisper"]
 
 [project.scripts]
 url-extract = "url_extract.extract:main"

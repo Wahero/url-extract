@@ -65,7 +65,7 @@ import jinja2
 CST = timezone(timedelta(hours=8))
 
 # 版本号（单一来源，与 pyproject.toml 保持同步）
-__version__ = '2.6.2'
+__version__ = '2.6.3'
 
 # 通用 UA（所有请求都用）
 _UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -338,7 +338,8 @@ def _wbi_sign(params: dict) -> dict:
 #   1. 环境变量 DEFUDDLE_BIN（指向 defuddle/npx 可执行文件）
 #   2. PATH 中的 defuddle
 #   3. PATH 中的 npx / npx.cmd（用 npx defuddle ...）
-#   4. 都没找到且 DEFUDDLE_AUTO_INSTALL != 0：尝试 `npm i -g defuddle`
+#   4. 都没找到：不自动安装（安全原则：禁止运行时联网安装依赖，避免触发平台安全扫描）。
+#      调用方会降级到 noembed，并在终端给出明确的手动安装指引。
 #
 # Windows 下 .cmd 文件需 shell=True；通过扩展名自动识别。
 
@@ -373,22 +374,14 @@ def _resolve_defuddle() -> tuple[str, bool, str | None]:
     if npx:
         return (npx, npx.lower().endswith(('.cmd', '.bat')), None)
 
-    # 4. 自动安装（除非显式禁用）
-    if os.environ.get('DEFUDDLE_AUTO_INSTALL', '1') != '0':
-        npm = shutil.which('npm') or shutil.which('npm.cmd')
-        if npm:
-            print('[defuddle] 未找到，尝试 npm i -g defuddle ...', file=sys.stderr)
-            try:
-                subprocess.run(
-                    [npm, 'install', '-g', 'defuddle'],
-                    timeout=120, check=False,
-                )
-            except Exception as e:
-                print(f'[defuddle] 自动安装失败: {e}', file=sys.stderr)
-            dfd = shutil.which('defuddle')
-            if dfd:
-                return (dfd, dfd.lower().endswith(('.cmd', '.bat')), None)
-
+    # 4. 未找到：不自动安装（安全原则：禁止运行时联网安装依赖，避免触发平台安全扫描）。
+    #    调用方会降级到 noembed，并在终端给出明确的手动安装指引。
+    print(
+        '[defuddle] 未找到 defuddle。网页正文抽取将降级处理。\n'
+        '          请手动安装： npm install -g defuddle\n'
+        '          或设置环境变量 DEFUDDLE_BIN 指向其可执行文件。',
+        file=sys.stderr,
+    )
     return ('', False, None)
 
 
@@ -431,8 +424,8 @@ def _get_defuddle_cmd():
 #   1. 环境变量 YTDLP_BIN（指向 yt-dlp 可执行文件）
 #   2. PATH 中的 yt-dlp / yt-dlp.exe
 #   3. python -m yt_dlp（fallback，需要 yt_dlp Python 包）
-#   4. 都没找到且 YTDLP_AUTO_INSTALL != 0：尝试 pip install yt-dlp
-#      (走阿里源 -i https://mirrors.aliyun.com/pypi/simple/ 避免 timeout)
+#   4. 都没找到：不自动安装（安全原则：禁止运行时联网安装依赖，避免触发平台安全扫描）。
+#      调用方会降级到 noembed，并在终端给出明确的手动安装指引。
 #   5. 都没有 → 返回空字符串，调用方应走 noembed 降级路径
 
 def _resolve_ytdlp() -> str:
@@ -455,22 +448,14 @@ def _resolve_ytdlp() -> str:
     except ImportError:
         pass
 
-    # 4. 自动安装（除非显式禁用）
-    if os.environ.get('YTDLP_AUTO_INSTALL', '1') != '0':
-        print('[yt-dlp] 未找到，尝试 pip install yt-dlp ...', file=sys.stderr)
-        mirror = 'https://mirrors.aliyun.com/pypi/simple/'
-        try:
-            subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', '--break-system-packages', '-i', mirror, 'yt-dlp'],
-                timeout=180, check=False,
-            )
-        except Exception as e:
-            print(f'[yt-dlp] 自动安装失败: {e}', file=sys.stderr)
-        # 5. 装完再试
-        ytdlp = shutil.which('yt-dlp') or shutil.which('yt-dlp.exe')
-        if ytdlp:
-            return ytdlp
-
+    # 4. 未找到：不自动安装（安全原则：禁止运行时联网安装依赖，避免触发平台安全扫描）。
+    #    调用方会降级到 noembed，并在终端给出明确的手动安装指引。
+    print(
+        '[yt-dlp] 未找到 yt-dlp。YouTube 元数据/字幕抽取将降级处理。\n'
+        '          请手动安装： pip install yt-dlp\n'
+        '          或设置环境变量 YTDLP_BIN 指向其可执行文件。',
+        file=sys.stderr,
+    )
     return ''
 
 
@@ -1945,8 +1930,10 @@ def _build_context_for_source(data: dict) -> dict:
     source = data.get('source', '')
     title = data.get('title', '') or data.get('full_name', '') or '未命名'
     duration_sec = int(data.get('duration_sec', 0) or 0)
+    lang = data.get('lang', 'zh')
     return {
         'source': source,
+        'lang': lang,
         'title': title,
         'url': data.get('url', ''),
         'version': data.get('version', __version__),
@@ -2012,23 +1999,29 @@ _JINJA_ENV = jinja2.Environment(
 
 
 def _render_template(source: str, context: dict) -> str:
-    """按 source 选择模板渲染；找不到则走通用 fallback（拼装 desc+content）。"""
-    template_name = f"{source}.md.j2"
-    try:
-        tpl = _JINJA_ENV.get_template(template_name)
-        return tpl.render(**context)
-    except jinja2.TemplateNotFound:
-        # 通用 fallback：标题 + desc + 正文 + 参考资料
-        lines = [f"# {context['title']}", "",
-                 f"> 来源：{source} · 链接：{context['url']}", ""]
-        if context.get('desc'):
-            lines += ["## 简介", "", context['desc'], ""]
-        if context.get('content_markdown'):
-            lines += ["## 内容", "", context['content_markdown'], ""]
-        lines += ["## 参考资料", "", f"- 原始链接：{context['url']}", "",
-                  "---", "",
-                  f"*本文档由 url-extract v{context['version']} 自动生成。*"]
-        return "\n".join(lines)
+    """按 source 选择模板渲染；lang=en 时优先用 <source>_en.md.j2，找不到则回退中文模板。"""
+    lang = context.get('lang', 'zh')
+    candidates = []
+    if lang == 'en':
+        candidates.append(f"{source}_en.md.j2")
+    candidates.append(f"{source}.md.j2")
+    for template_name in candidates:
+        try:
+            tpl = _JINJA_ENV.get_template(template_name)
+            return tpl.render(**context)
+        except jinja2.TemplateNotFound:
+            continue
+    # 通用 fallback：标题 + desc + 正文 + 参考资料
+    lines = [f"# {context['title']}", "",
+             f"> 来源：{source} · 链接：{context['url']}", ""]
+    if context.get('desc'):
+        lines += ["## 简介", "", context['desc'], ""]
+    if context.get('content_markdown'):
+        lines += ["## 内容", "", context['content_markdown'], ""]
+    lines += ["## 参考资料", "", f"- 原始链接：{context['url']}", "",
+              "---", "",
+              f"*本文档由 url-extract v{context['version']} 自动生成。*"]
+    return "\n".join(lines)
 
 
 def _build_markdown_content(data: dict) -> str:
@@ -2131,6 +2124,8 @@ def main():
     parser.add_argument('--bili-jct', type=str, default=os.environ.get('BILIBILI_BILI_JCT', ''), help='B站 bili_jct Cookie（也可设环境变量 BILIBILI_BILI_JCT）')
     parser.add_argument('--dedeuserid', type=str, default=os.environ.get('BILIBILI_DEDEUSERID', ''), help='B站 DedeUserID Cookie（也可设环境变量 BILIBILI_DEDEUSERID）')
     parser.add_argument('--wbi-sign', choices=['on', 'off'], default='off', help='是否对 B站 API 请求加 wbi 签名（默认 off。开启会增加一次 nav 接口调用，但能提高 view/player/reply 接口在风控 IP 上的成功率）')
+    parser.add_argument('--lang', choices=['zh', 'en'], default='zh', help='输出语言：zh=简体中文（默认）/ en=English（影响 Markdown 渲染与 IMA 上传文档）')
+    parser.add_argument('--md', default='', help='额外输出一份 Markdown 文档到指定路径（内容受 --lang 影响）')
     args = parser.parse_args()
 
     # 注入 B站 Cookie + wbi 开关（如果提供了 SESSDATA 或 wbi-sign on）
@@ -2162,6 +2157,7 @@ def main():
         sys.exit(1)
     data['extracted_at'] = datetime.now(tz=CST).strftime('%Y-%m-%d %H:%M:%S')
     data['version'] = __version__
+    data['lang'] = args.lang
 
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -2173,16 +2169,29 @@ def main():
     if 'defuddle' in engine:
         print(f"   引擎: defuddle CLI (本地提取)", file=sys.stderr)
 
+    # 额外输出 Markdown（受 --lang 影响）
+    if args.md:
+        md = _build_markdown_content(data)
+        with open(args.md, 'w', encoding='utf-8') as f:
+            f.write(md)
+        print(f"\n✅ Markdown 已写出 -> {args.md}", file=sys.stderr)
+
     # IMA 导入 (--ima-raw 优先)
     if args.ima_raw:
         source_url = data.get('url', args.link)
-        _upload_to_ima_raw(data, source_url, args.ima_raw_md)
+        ok = _upload_to_ima_raw(data, source_url, args.ima_raw_md)
+        if not ok:
+            print("[IMA] ❌ 上传到 RAW 知识库失败，退出码 1。", file=sys.stderr)
+            sys.exit(1)
     elif args.upload_ima:
         if not args.ima_kb:
             print("[IMA] 错误: 请用 --ima-kb 指定目标知识库名称。", file=sys.stderr)
-        else:
-            source_url = data.get('url', args.link)
-            _upload_to_ima(data, args.ima_kb.strip(), source_url)
+            sys.exit(1)
+        source_url = data.get('url', args.link)
+        ok = _upload_to_ima(data, args.ima_kb.strip(), source_url)
+        if not ok:
+            print("[IMA] ❌ 导入知识库失败，退出码 1。", file=sys.stderr)
+            sys.exit(1)
 
 if __name__ == '__main__':
     main()

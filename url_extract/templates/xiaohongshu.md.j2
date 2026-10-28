@@ -14,9 +14,9 @@
 
 {% if transcript %}
 
-## ✅ 视频转写（Apple Speech zh-CN）
+## ✅ 视频转写（{% if asr_backend == 'whisper' %}Whisper{% elif asr_backend == 'google-cloud-speech' %}Google Speech{% elif asr_backend %}{{ asr_backend }}{% else %}Apple Speech{% endif %} zh-CN）
 
-> 本次抽取通过视频 CDN 直链 → ffmpeg 抽音 → Apple Speech 转写，**无需登录小红书账号**。
+> 本次抽取通过视频 CDN 直链 → ffmpeg 抽音 → 本地 ASR（{% if asr_backend == 'whisper' %}Whisper{% elif asr_backend == 'google-cloud-speech' %}Google Speech{% elif asr_backend %}{{ asr_backend }}{% else %}Apple Speech{% endif %}）转写，**无需登录小红书账号**。
 > 转写由 ASR 自动生成，难免有错漏（尤其医学/法律等专业术语），请以原视频及专业人士面诊为准。
 
 ### 完整转写文本
