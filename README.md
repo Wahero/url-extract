@@ -1,8 +1,8 @@
 # URL Extract — 通用内容精华抽取
 
-> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.6.1：跨平台 ASR 后端（apple-speech → whisper → google-cloud）+ 179 测试覆盖 + 全平台兼容**。**v2.6：XHS 视频笔记自动走 CDN→ASR 抽取完整转写（无需登录）+ 7 来源 + B 站风控缓解 + IMA API tenacity 重试 + 工程化重构 + 147 个单元测试。**
+> 把视频、网页、GitHub 仓库变回纯粹的精华文字。夜深了不想看视频？信息过载只需要干货？这就是为你准备的。**v2.6.2：可 `pip install` 的套件化（templates 隨包附帶）+ Windows 測試通過 + 暫存自動清理 + 199 測試覆蓋**。**v2.6.1：跨平台 ASR 后端（apple-speech → whisper → google-cloud）+ 全平台兼容**。**v2.6：XHS 视频笔记自动走 CDN→ASR 抽取完整转写（无需登录）+ 7 来源 + B 站风控缓解 + IMA API tenacity 重试 + 工程化重构。**
 
-[![Tests](https://img.shields.io/badge/tests-179%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-199%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -200,25 +200,23 @@ python3 extract.py "https://b23.tv/xxx" -o result.json
 
 ```
 url-extract/
-├── extract.py                # 主入口脚本（v2.6：XHS 视频 CDN→ASR + 7 来源 + B站风控 + 类型注解）
-├── ima_client.py             # IMA OpenAPI 客户端 v1.5（tenacity 重试 + 完整读/写 API）
-├── setup.py                  # IMA 凭证引导（交互式）
+├── url_extract/
+│   ├── extract.py            # 主入口（v2.6：XHS 视频 CDN→ASR + 7 来源 + B站风控 + 类型注解）
+│   ├── ima_client.py         # IMA OpenAPI 客户端 v1.5（tenacity 重试 + 完整读/写 API）
+│   ├── xhs_asr.py            # 小紅書影片 ASR（apple-speech → whisper → google-cloud）
+│   └── templates/            # Markdown 模板（Jinja2，7 個，隨套件打包）
+├── extract.py                # 向後相容入口（等同 url_extract.extract）
+├── ima_client.py             # 向後相容入口
+├── xhs_asr.py                # 向後相容入口
+├── tools/ima_setup.py        # IMA 凭证引导（交互式）
 ├── SKILL.md                  # AI Skill 定义（7 来源 + 触发词）
 ├── README.md                 # 本文件
 ├── CHANGELOG.md              # 完整版本历史
 ├── REFACTOR_PROGRESS.md      # 2026-08-07 重构工作汇报
 ├── LICENSE                   # MIT
-├── pyproject.toml            # Python 包元数据
+├── pyproject.toml            # Python 包元数据（templates 隨套件打包）
 ├── requirements.txt          # 依赖清单（含可选）
-├── templates/                # Markdown 模板（Jinja2，7 个）
-│   ├── bilibili.md.j2
-│   ├── github.md.j2
-│   ├── webpage.md.j2
-│   ├── weishi.md.j2
-│   ├── youtube.md.j2
-│   ├── xiaohongshu.md.j2
-│   └── douyin.md.j2
-├── tests/                    # 147 个单元测试
+├── tests/                    # 199 个单元测试
 │   ├── test_bilibili_cookie_retry.py   (24 用例)
 │   ├── test_new_sources.py             (43 用例，含 XHS v2.6 视频抽取 16 个)
 │   ├── test_ima_client.py              (7 用例)
@@ -229,7 +227,8 @@ url-extract/
 │   ├── test_refactor_13.py             (12 用例)
 │   ├── test_templates.py               (10 用例)
 │   └── fixtures/           # 测试固定数据
-└── .github/workflows/test.yml   # GitHub Actions CI（pytest 3.10/3.11/3.12）
+└── .github/workflows/test.yml   # GitHub Actions CI（pytest 3.10/3.11/3.12 × Ubuntu/Windows）
+```
 ```
 
 ## 测试与 CI

@@ -1,3 +1,20 @@
 __pycache__/
 *.pyc
+*.pyo
 .DS_Store
+
+# 虛擬環境
+.venv/
+.venv*/
+venv/
+
+# 建置產物
+build/
+dist/
+*.egg-info/
+
+# 測試 / 覆蓋率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/

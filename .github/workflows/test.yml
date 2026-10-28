@@ -8,12 +8,13 @@ on:
 
 jobs:
   test:
-    name: pytest (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: pytest (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20  # 防止单 job 卡死导致 matrix 撞 6h limit 被 cancel
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
@@ -42,3 +43,24 @@ jobs:
           # 确认 extract.py / ima_client.py 都能正常 import，无 syntax 错误
           python -c "import extract; print('extract.py: ok')"
           python -c "import ima_client; print('ima_client.py: ok')"
+
+      # 只跑一次：驗證 wheel 內容（套件模組 + templates 都要在），避免「裝了卻缺檔」
+      - name: Build wheel and verify packaged files
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          pip install build
+          python -m build --wheel
+          python - <<'PY'
+          import glob, zipfile
+          whl = glob.glob('dist/*.whl')[0]
+          names = zipfile.ZipFile(whl).namelist()
+          required = [
+              'url_extract/extract.py',
+              'url_extract/ima_client.py',
+              'url_extract/xhs_asr.py',
+              'url_extract/templates/bilibili.md.j2',
+          ]
+          missing = [n for n in required if n not in names]
+          assert not missing, f'wheel 缺少檔案: {missing}'
+          print(f'wheel ok: {whl} ({len(names)} files)')
+          PY

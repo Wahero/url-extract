@@ -184,7 +184,7 @@ apple-speech transcribe --language zh-CN
 export IMA_OPENAPI_CLIENTID="your_client_id"
 export IMA_OPENAPI_APIKEY="your_api_key"
 # 或运行引导脚本
-python setup.py
+python tools/ima_setup.py
 ```
 
 > 凭证仅通过环境变量运行时传递，**不写入任何文件**。
@@ -219,7 +219,7 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 | 文件 | 说明 |
 |---|---|
 | `ima_client.py` | IMA OpenAPI 客户端 v1.4（tenacity 重试 + 类型注解 + ETag 判定） |
-| `setup.py` | 凭证引导脚本，交互式输入 |
+| `tools/ima_setup.py` | 凭证引导脚本，交互式输入 |
 
 所有 IMA 请求仅发往 `https://ima.qq.com`，凭证永不出现在代码中。
 
@@ -285,9 +285,11 @@ url-extract/
 ├── README.md                 # 项目说明
 ├── CHANGELOG.md              # 完整版本历史
 ├── REFACTOR_PROGRESS.md      # 2026-08-07 重构工作汇报
-├── extract.py                # 主入口脚本（v2.6：XHS 视频 CDN→ASR + 147 测试覆盖）
-├── ima_client.py             # IMA 客户端 v1.4
-├── setup.py                  # IMA 凭证引导
+├── url_extract/              # 套件本體（extract.py / ima_client.py / xhs_asr.py / templates/）
+├── extract.py                # 向後相容入口（= url_extract.extract）
+├── ima_client.py             # 向後相容入口
+├── xhs_asr.py                # 向後相容入口
+├── tools/ima_setup.py        # IMA 凭证引导
 ├── pyproject.toml            # Python 包元数据
 ├── requirements.txt          # 依赖清单
 ├── templates/                # Markdown 模板（Jinja2，7 个）
