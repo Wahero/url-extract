@@ -580,6 +580,104 @@ def upload_markdown_to_kb(
     return result
 
 
+# ============================================================
+# v1.5 新增 — 完整读 API + 笔记 API（2026-09-02）
+# 对齐官方 ima-skill v1.1.9（https://app-dl.ima.qq.com/skills/ima-skills-1.1.9.zip）
+# 现有 v1.4 函数一律不动，仅追加。完整接口文档见 SKILL.md。
+# ============================================================
+
+KB_BASE = "openapi/wiki/v1"
+NOTE_BASE = "openapi/note/v1"
+
+
+def get_knowledge_base(kb_ids: list[str]) -> dict[str, Any]:
+    """KB 详细信息：封面/描述/推荐问题。kb_ids 1-20 个。"""
+    if not 1 <= len(kb_ids) <= 20:
+        raise ValueError(f"kb_ids 数量 1-20，当前 {len(kb_ids)}")
+    return api_call(f"{KB_BASE}/get_knowledge_base", {"ids": kb_ids})
+
+
+def get_knowledge_list(kb_id: str, folder_id: str = "", cursor: str = "", limit: int = 50) -> dict[str, Any]:
+    """列 KB 根目录/文件夹内容。limit 1-50；根目录省略 folder_id。"""
+    if not 1 <= limit <= 50:
+        raise ValueError(f"limit 1-50，当前 {limit}")
+    body: dict[str, Any] = {"knowledge_base_id": kb_id, "cursor": cursor, "limit": limit}
+    if folder_id:
+        body["folder_id"] = folder_id
+    return api_call(f"{KB_BASE}/get_knowledge_list", body)
+
+
+def get_media_info(media_id: str) -> dict[str, Any]:
+    """取文件下载 URL：返回 {data: {media_type, url_info: {url, headers}}}。"""
+    return api_call(f"{KB_BASE}/get_media_info", {"media_id": media_id})
+
+
+def download_kb_file(media_id: str) -> tuple[bytes, dict[str, Any]]:
+    """下载 KB 文件：自动用 url_info.url + headers 拉文件，返回 (bytes, url_info)。"""
+    info = get_media_info(media_id)
+    url_info = (info.get("data") or {}).get("url_info") or {}
+    url = url_info.get("url", "")
+    if not url:
+        raise RuntimeError(f"url_info 为空（media_id={media_id}）")
+    req = urllib.request.Request(url, headers=url_info.get("headers") or {}, method="GET")
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read(), url_info
+
+
+def search_note(query: str, search_type: int = 0, start: int = 0, end: int = 20) -> dict[str, Any]:
+    """搜笔记：search_type=0 按标题，1 按正文；分页用 start/end。"""
+    if search_type not in (0, 1):
+        raise ValueError(f"search_type 必须 0 或 1，当前 {search_type}")
+    qi = {"title": query} if search_type == 0 else {"content": query}
+    return api_call(f"{NOTE_BASE}/search_note", {
+        "search_type": search_type, "query_info": qi, "start": start, "end": end,
+    })
+
+
+def list_notebook(cursor: str = "0", limit: int = 20) -> dict[str, Any]:
+    """列笔记本：首次 cursor 必传 '0'（不是空串）。"""
+    return api_call(f"{NOTE_BASE}/list_notebook", {"cursor": cursor, "limit": limit})
+
+
+def list_note(folder_id: str = "", sort_type: int = 0, cursor: str = "", limit: int = 20) -> dict[str, Any]:
+    """列笔记：folder_id='' = 全部笔记；根目录从 list_notebook 取 user_list_{uid}。"""
+    return api_call(f"{NOTE_BASE}/list_note", {
+        "folder_id": folder_id, "sort_type": sort_type, "cursor": cursor, "limit": limit,
+    })
+
+
+def get_doc_content(note_id: str, content_format: int = 0) -> dict[str, Any]:
+    """读笔记正文：content_format=0 纯文本（Markdown 不支持）。"""
+    return api_call(f"{NOTE_BASE}/get_doc_content", {
+        "note_id": note_id, "target_content_format": content_format,
+    })
+
+
+def _validate_utf8(content: str, op: str) -> None:
+    """import_doc / append_doc 强校验：content 必须是合法 UTF-8。"""
+    try:
+        content.encode("utf-8").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError) as e:
+        raise ValueError(f"{op} content 不是合法 UTF-8，IMA 会乱码不可逆: {e}") from e
+
+
+def import_doc(content: str, folder_id: str = "") -> dict[str, Any]:
+    """创建新笔记（Markdown）。要求 content 合法 UTF-8，不支持本地图片（file:// 等路径）。"""
+    _validate_utf8(content, "import_doc")
+    body: dict[str, Any] = {"content_format": 1, "content": content}
+    if folder_id:
+        body["folder_id"] = folder_id
+    return api_call(f"{NOTE_BASE}/import_doc", body)
+
+
+def append_doc(note_id: str, content: str) -> dict[str, Any]:
+    """⚠️ 追加内容到已有笔记（不可撤销）。调用方必须先确认用户明确指定了目标笔记。要求 content 合法 UTF-8。"""
+    _validate_utf8(content, "append_doc")
+    return api_call(f"{NOTE_BASE}/append_doc", {
+        "note_id": note_id, "content_format": 1, "content": content,
+    })
+# 客户端自检（扩展版，列出新增接口）
+# -----------------------------------------------------------
 if __name__ == "__main__":
     print("IMA Client 自检...")
     try:
