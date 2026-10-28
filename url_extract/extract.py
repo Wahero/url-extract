@@ -38,6 +38,8 @@ import logging
 import time
 import hashlib
 import urllib.parse
+import ipaddress
+import socket
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 
@@ -65,7 +67,7 @@ import jinja2
 CST = timezone(timedelta(hours=8))
 
 # 版本号（单一来源，与 pyproject.toml 保持同步）
-__version__ = '2.6.3'
+__version__ = '2.6.4'
 
 # 通用 UA（所有请求都用）
 _UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -84,22 +86,42 @@ _DEFAULT_RETRY = int(os.environ.get('EXTRACT_HTTP_RETRY', '2'))
 
 def safe_request(method: str, url: str, max_retries: int = _DEFAULT_RETRY,
                  backoff: float = 1.0, timeout: float = 30, **kwargs):
-    """带重试的 requests 调用。
+    """带重试的 requests 调用（内置 SSRF 重定向校验）。
 
     重试策略（``max_retries`` 是「总调用次数」，默认 2 → 最多调用 2 次）：
       - ConnectionError / Timeout      → 重试（瞬时网络问题居多）
       - HTTP 429 / 5xx                 → 重试（尊重 Retry-After，上限 10 秒）
       - 其它 4xx                       → 不重试（业务错误，重试无意义）
 
+    重定向处理：关闭 requests 的自动跳转，改为手动跟随并**逐跳校验**目标主机，
+    防止通过 30x 跳转到内网（SSRF）。最多跟随 10 跳。
+
     ``timeout`` 默认 30 秒；任何情况下都不允许无限等待。
     通过环境变量 EXTRACT_HTTP_RETRY 可调整总调用次数。
     """
     import time as _time
+    from urllib.parse import urljoin
+    # 关闭自动跳转，由下方手动跟随并逐跳校验（防 SSRF 跳转）
+    kwargs['allow_redirects'] = False
     attempts = max(1, max_retries)
     last_exc: Exception | None = None
+    current_url = url
     for attempt in range(1, attempts + 1):
         try:
-            r = requests.request(method, url, timeout=timeout, **kwargs)
+            r = requests.request(method, current_url, timeout=timeout, **kwargs)
+            # 手动跟随重定向，逐跳 SSRF 校验
+            _hops = 0
+            while r.is_redirect and r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get('Location')
+                if not loc:
+                    break
+                next_url = urljoin(current_url, loc)
+                validate_url(next_url)  # 逐跳校验目标主机
+                current_url = next_url
+                _hops += 1
+                if _hops > 10:
+                    raise requests.exceptions.TooManyRedirects("重定向次数过多，已中止")
+                r = requests.request(method, current_url, timeout=timeout, **kwargs)
             r.raise_for_status()
             return r
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
@@ -688,6 +710,8 @@ def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
 # ============================================================
 
 # 禁止访问的地址（防止 SSRF 攻击云元数据 / 内网）
+# 说明：除精确字符串外，validate_url 还会对主机做 IP 字面量归一化 +
+# DNS 解析后私网段检查，覆盖 127.1 / 十进制 IP / IPv6 / DNS 重绑定 / 跳转等绕过。
 _BLOCKED_HOSTS = {
     '127.0.0.1', 'localhost', '0.0.0.0',
     '169.254.169.254',  # AWS / GCP / Azure 云元数据服务
@@ -702,25 +726,114 @@ class URLError(Exception):
     pass
 
 
-def validate_url(url: str) -> str:
+def _normalize_ip_literal(host: str):
+    """尝试把主机名当作 IP 字面量归一化为 ip_address 对象。
+
+    覆盖常见绕过写法：
+      - 省略八位组：127.1 -> 127.0.0.1
+      - 十进制：2130706433 -> 127.0.0.1
+      - 十六进制：0x7f000001 -> 127.0.0.1
+    无法解析时返回 None。
+    """
+    if not host:
+        return None
+    h = host.strip().strip('[]')
+    # 标准点分十进制 / IPv6
+    try:
+        return ipaddress.ip_address(h)
+    except ValueError:
+        pass
+    # 单段十进制（如 2130706433）
+    if re.fullmatch(r'[0-9]+', h):
+        try:
+            return ipaddress.ip_address(int(h))
+        except (ValueError, OverflowError):
+            pass
+    # 十六进制（如 0x7f000001）
+    if re.fullmatch(r'0x[0-9a-fA-F]+', h):
+        try:
+            return ipaddress.ip_address(int(h, 16))
+        except (ValueError, OverflowError):
+            pass
+    # 省略八位组：127.1 / 127.0.1
+    if re.fullmatch(r'\d+(\.\d+){1,2}', h):
+        parts = h.split('.')
+        while len(parts) < 4:
+            parts.append('0')
+        try:
+            return ipaddress.ip_address('.'.join(parts))
+        except ValueError:
+            pass
+    return None
+
+
+def _ip_is_blocked(ip_str: str) -> bool:
+    """判断一个 IP 字符串是否属于应禁止的地址（私网/回环/链路本地/保留/组播）。"""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+    )
+
+
+_DNS_CACHE: dict = {}
+
+
+def _resolve_host_ips(host: str):
+    """解析主机名到 IP 列表；解析失败返回空列表（fail-soft，不阻断正常域名）。"""
+    if host in _DNS_CACHE:
+        return _DNS_CACHE[host]
+    try:
+        ips = [info[4][0] for info in socket.getaddrinfo(host, None)]
+    except (socket.gaierror, UnicodeError, OSError):
+        ips = []
+    _DNS_CACHE[host] = ips
+    return ips
+
+
+def validate_url(url: str, resolve_dns: bool = True) -> str:
     """验证 URL 的协议和主机名，返回原 URL。
 
     规则：
       - 协议必须是 http/https（拒绝 file://、ftp:// 等）
       - 主机名必须存在
-      - 主机名不能在 _BLOCKED_HOSTS 名单中（防 SSRF）
+      - 主机名不能是精确黑名单（localhost / 元数据服务等）
+      - 主机名若为 IP 字面量，禁止私网/回环/链路本地/保留地址
+        （覆盖 127.1、十进制 2130706433、IPv6 等绕过写法）
+      - 主机名解析后的任一 IP 不得为上述禁止地址（防 DNS 指向内网）
+      - 主机名后缀为 .internal / .local / .localhost 亦禁止
 
     Raises:
-        URLError: URL 不合法时
+        URLError: URL 不合法或命中 SSRF 规则时
     """
-    from urllib.parse import urlparse
     parsed = urlparse(url)
     if parsed.scheme not in _ALLOWED_SCHEMES:
         raise URLError(f"不支持的协议: {parsed.scheme} (仅支持 http/https)")
     if not parsed.hostname:
         raise URLError(f"URL 缺少主机名: {url}")
-    if parsed.hostname.lower() in _BLOCKED_HOSTS:
-        raise URLError(f"禁止访问的地址: {parsed.hostname}")
+    host = parsed.hostname.lower()
+
+    # 1) 精确黑名单
+    if host in _BLOCKED_HOSTS:
+        raise URLError(f"禁止访问的地址: {host}")
+    # 2) 内部域名后缀
+    if host.endswith(('.internal', '.local', '.localhost')):
+        raise URLError(f"禁止访问的内部域名: {host}")
+    # 3) IP 字面量（归一化后检查）
+    lit = _normalize_ip_literal(host)
+    if lit is not None and _ip_is_blocked(str(lit)):
+        raise URLError(f"禁止访问的地址: {host}")
+    # 4) DNS 解析后私网段检查（fail-soft：解析失败不阻断）
+    if resolve_dns:
+        for ip in _resolve_host_ips(host):
+            if _ip_is_blocked(ip):
+                raise URLError(f"主机解析到禁止访问的地址: {host} -> {ip}")
     return url
 
 
@@ -729,23 +842,36 @@ def validate_url(url: str) -> str:
 # ============================================================
 
 def detect_source(link: str) -> str:
-    """检测链接类型：bilibili / github / weishi / webpage"""
+    """检测链接类型：bilibili / github / weishi / webpage / youtube / xiaohongshu / douyin
+
+    改用 urlparse 提取 hostname 做后缀/精确匹配，避免子串误判
+    （如 youtube.com/watch?v=x&ref=github.com 不应被当作 github）。
+    """
+    try:
+        host = (urlparse(link).hostname or '').lower()
+    except Exception:
+        host = ''
     s = link.strip().lower()
-    if 'bilibili.com' in s or 'b23.tv' in s or re.search(r'BV[0-9A-Za-z]{10}', link):
+
+    # B站（含短链 b23.tv 与 BV 号）
+    if host in ('bilibili.com', 'b23.tv') or host.endswith('.bilibili.com') \
+            or re.search(r'BV[0-9A-Za-z]{10}', link):
         return 'bilibili'
-    if 'github.com' in s:
-        return 'github'
-    if 'weishi.qq.com' in s or ('v.qq.com' in s and 'wx_tvplugin' in s):
-        return 'weishi'
-    # YouTube
-    if 'youtube.com' in s or 'youtu.be' in s:
+    # YouTube（含 youtu.be 与子域）
+    if host in ('youtube.com', 'youtu.be') or host.endswith(('.youtube.com', '.youtu.be')):
         return 'youtube'
-    # 小红书 (短链 xhslink.com / 长链 xiaohongshu.com)
-    if 'xiaohongshu.com' in s or 'xhslink.com' in s or 'xhslink.cn' in s:
+    # 小红书
+    if host in ('xiaohongshu.com', 'xhslink.com', 'xhslink.cn') or host.endswith(('.xiaohongshu.com', '.xhslink.com', '.xhslink.cn')):
         return 'xiaohongshu'
-    # 抖音 (短链 v.douyin.com / 长链 douyin.com / iesdouyin.com)
-    if 'douyin.com' in s or 'iesdouyin.com' in s:
+    # 抖音
+    if host in ('douyin.com', 'iesdouyin.com') or host.endswith(('.douyin.com', '.iesdouyin.com')):
         return 'douyin'
+    # 腾讯微视
+    if host == 'weishi.qq.com' or (host == 'v.qq.com' and 'wx_tvplugin' in s):
+        return 'weishi'
+    # GitHub
+    if host == 'github.com' or host.endswith('.github.com'):
+        return 'github'
     return 'webpage'
 
 # ============================================================
@@ -1855,6 +1981,8 @@ def fmt_ts(ts: int) -> str:
 
 def extract(link: str) -> dict:
     """自动检测来源并抽取。"""
+    # 安全防护：作为库调用时也要经过 SSRF 校验（CLI 路径在 main 中已校验）
+    validate_url(link)
     source = detect_source(link)
     print(f"[检测] 来源类型: {source}", file=sys.stderr)
 

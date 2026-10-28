@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.6.4] — 2026-10-28
+
+### Security
+- **SSRF 防护强化（`validate_url`）**：新增 IP 字面量归一化（覆盖 `127.1`、`2130706433` 十进制、十六进制等绕过写法）、私网/回环/链路本地/保留地址段检查、DNS 解析后私网段检查（fail-soft）、以及 `.internal` / `.local` / `.localhost` 后缀拦截。
+- **重定向 SSRF 防护（`safe_request`）**：关闭 requests 自动跳转，改为手动跟随并**逐跳校验**目标主机，防止通过 `30x` 跳转到内网（含云元数据 `169.254.169.254`）。
+- **库调用亦受防护**：公开入口 `extract()` 现会调用 `validate_url()`，不再仅 CLI 路径校验。
+- **来源侦测修正（`detect_source`）**：由子串匹配改为基于 `urlparse` hostname 的后缀/精确匹配，修复 `youtube.com/watch?v=x&ref=github.com` 被误判为 GitHub 的问题。
+- **新增 `SECURITY.md`**：漏洞报告渠道与已知安全边界说明。
+- **`SKILL.md` 权限最小化**：注明 Bash 仅用于调用 `yt-dlp` / `ffmpeg` / `whisper` / `defuddle` / `npm` / `pip` / `python` 等本地提取与转写工具。
+
 ## [2.6.3] — 2026-10-28
 
 ### Fixed

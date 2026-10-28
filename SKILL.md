@@ -4,6 +4,8 @@ description: 把链接（B站视频 / YouTube / 小红书 / 抖音 / GitHub 仓�
 allowed-tools: Read, Write, Bash, WebSearch
 ---
 
+> 🔒 **Bash 权限范围（权限最小化）**：本技能仅在本地调用提取 / 转写工具时使用 Bash，具体为 `yt-dlp`、`ffmpeg`、`whisper` / `openai-whisper`、`defuddle`（npm）、`npm`、`pip`、`python` / `python3`。**不会**执行任何用户未指定的任意系统命令。
+
 # URL Extract — 通用内容精华抽取
 
 把任何链接变成一篇干净、结构化的 Markdown 精华文档。**支持 7 种来源**：B 站视频、YouTube、小红书、抖音、GitHub 仓库、一般网页、腾讯微视。**`--ima-raw` 上传完整 Markdown 到 IMA「RAW」知识库；`--ima-raw-md` 支持外部 Markdown 文件优先上传。**
