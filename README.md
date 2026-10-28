@@ -20,7 +20,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.6.3-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.6.4-blue)](CHANGELOG.md)
 
 **[简体中文](#-简体中文) · [English](#-english)**
 
