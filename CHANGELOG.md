@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.6.2] — 2026-10-28
+
+### Fixed
+- **`pip install .` 不再失敗**：`setup.py` 原本是 IMA 憑證嚮導，會被 setuptools 當成打包腳本執行而卡在 `input()`。已移至 `tools/ima_setup.py`（PKG 打包改用 `pyproject.toml`）。
+- **套件化補齊**：程式碼移入 `url_extract/`，`pyproject.toml` 改用 `packages.find` + `package-data`，`xhs_asr.py` 與 `templates/*.j2` 現在會一起被打包（之前安裝後小紅書 ASR 與模板渲染都會失效）。
+- **Windows 上測試失敗**：`test_url_validation.py` 讀 `pyproject.toml` 未指定 encoding，繁中 Windows 以 GBK 解碼會拋 `UnicodeDecodeError`。
+- **`safe_request` 文件與行為不一致**：docstring 寫「共 3 次」，實際為 2 次；現已改為與程式一致，並補上 `timeout=30` 預設值，避免無 timeout 請求卡死。
+- **暫存檔洩漏**：小紅書 CDN→ASR 失敗時會在 `%TEMP%` 留下影片／音檔（單次可達 100MB）。現在失敗會自動清理；`XHS_KEEP_MEDIA=1` 可保留現場。
+
+### Changed
+- `safe_request` 現在會重試 HTTP 429 / 5xx（尊重 `Retry-After`，上限 10 秒），4xx 仍不重試。
+- `tenacity` 列入正式依賴（原本只在 requirements.txt，安裝套件時會缺）。
+- CI 矩陣加入 Windows（3.10–3.12），並新增 wheel 內容檢查，防止再次漏檔。
+
+### Compatibility
+- 根目錄保留 `extract.py` / `ima_client.py` / `xhs_asr.py` 作為向後相容入口，`python extract.py ...` 與 `import extract` 行為不變；新入口為 `url-extract` 命令。
+
 ## [Unreleased] — v2.6
 
 ### Added

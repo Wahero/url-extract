@@ -183,7 +183,7 @@ def test_version_exported():
 def test_version_matches_pyproject():
     """__version__ 与 pyproject.toml 保持一致。"""
     import re as _re
-    toml = (ROOT / "pyproject.toml").read_text()
+    toml = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     m = _re.search(r'^version\s*=\s*"([\d.]+)"', toml, _re.M)
     assert m, "pyproject.toml 应有 version 字段"
     pyproject_version = m.group(1)
