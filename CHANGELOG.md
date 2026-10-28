@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.6.5] — 2026-10-28
+
+### A3 法律 / 合规硬化
+- **新增 `COMMERCIAL.md`**：明确划分免费 MIT 开源版与付费 Premium 独立商业许可的授权边界（付费版闭源分发、非独占可撤销、不随 MIT 授权商标）。
+- **README 新增「使用条款与免责声明 / Terms & Disclaimer」**（中/英）：用户须确保对来源内容有合法使用权、仅限个人学习研究、第三方内容版权归原所有者、付费版边界说明。
+- README tests badge 修正为 213 passed。
+
+### A2 护城河加固
+- **知识库写入抽象 `KnowledgeSink`**：IMA 不再是单点故障。新增 `IMARawSink` / `IMAUrlSink` / `LocalMarkdownSink`（零依赖本地 Markdown 后备）；`--local-out DIR` 可并行写入本地，任一 sink 成功即视为成功，全失败才 exit 1。
+- **来源健康探测 `--self-test`**：检查依赖工具（yt-dlp/ffmpeg/whisper/defuddle/node/npm）与关键端点可达性 + IMA 凭证配置，平台改接口时可即时发现。
+- **异常隔离 `SourceError`**：`extract()` 将任意未捕获异常统一包装为带 `source`/`code` 的结构化错误（如 `E_EXTRACT_FAILED`），便于 Agent 调用方机读错误码。
+
+### 测试
+- 新增 `tests/test_a2_hardening.py`（7 项：SourceError 包装 / LocalMarkdownSink 写入 / 多 sink 逻辑 / self_test 健康）。
+- 全量 220 passed（原 213 + 新 7）。
+
 ## [2.6.4] — 2026-10-28
 
 ### Security

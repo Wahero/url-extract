@@ -16,11 +16,11 @@
 
 <sub align="center">头图为内置 SMIL 动效的 SVG（无 JS、无外部依赖）。若你的浏览器/GitHub 未播放动画，会静态显示，构图不受影响；静态版见 <a href="assets/url-extract-banner.png">PNG</a>。</sub>
 
-[![Tests](https://img.shields.io/badge/tests-199%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-213%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.6.4-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.6.5-blue)](CHANGELOG.md)
 
 **[简体中文](#-简体中文) · [English](#-english)**
 
@@ -154,6 +154,14 @@ python3 extract.py "https://b23.tv/xxx" -o result.json --ima-raw
 - 项目名称 "URL Extract" 与相关标识不随 MIT 许可授权，未经授权不得用于衍生项目的宣传或冒充官方。
 - 本项目与 B 站、YouTube、小红书、抖音、腾讯等平台**无任何隶属或合作关系**，请遵守各平台服务条款，仅将本工具用于**个人学习与研究**，尊重原作者版权。
 - 问题反馈与安全漏洞报告：请通过 [GitHub Issues](https://github.com/Wahero/url-extract/issues) 提交。
+
+### 使用条款与免责声明（Terms & Disclaimer）
+
+- **使用前提**：你须确保对所要抽取的来源内容拥有合法的访问与使用权（含平台服务条款、原作者授权）。本工具**不授予**任何内容的使用权。
+- **用途限制**：本工具仅供**个人学习与研究**使用，不得用于商业再分发、规避平台技术措施或侵犯他人权益的行为。
+- **内容版权**：抽取得到的文字、字幕、转写内容，其版权归原作者 / 平台所有；本工具仅做技术性提取，不构成对任何权利的转让或许可。
+- **付费版本边界**：未来上架的 Premium 付费版本（如 Agensi.io 上的 Premium Pack）以独立商业许可提供，与本项目 MIT 开源代码分属不同授权体系；购买付费版本不代表获得本仓库代码的任何额外权利，亦不授予商标使用权（详见 [COMMERCIAL.md](COMMERCIAL.md)）。
+- **风险自担**：使用本工具产生的任何后果（含因平台规则变更导致内容不可用、账号风险等）由使用者自行承担。
 
 ### 声明
 
@@ -297,6 +305,14 @@ In one sentence: **this is a great time-saving tool, not a replacement for the o
 - The name "URL Extract" and related branding are **not** licensed under MIT and may not be used to promote derivative projects or imply official endorsement.
 - This project is **not affiliated with** Bilibili, YouTube, Xiaohongshu, Douyin, Tencent, or any other platform. Please comply with each platform's terms of service, use this tool for **personal learning and research only**, and respect original authors' copyrights.
 - Bug reports and security disclosures: please use [GitHub Issues](https://github.com/Wahero/url-extract/issues).
+
+### Terms of Use & Disclaimer
+
+- **Usage prerequisite**: You must ensure you have lawful access to and rights to use the source content you extract (including each platform's ToS and the original author's permission). This tool **grants no rights** to any extracted content.
+- **Use restriction**: This tool is for **personal learning and research only**. Do not use it for commercial redistribution, circumventing platform technical measures, or infringing others' rights.
+- **Content copyright**: Extracted text, subtitles, and transcripts remain the property of their original authors / platforms. The tool only performs technical extraction and conveys no transfer or license of any rights.
+- **Paid-tier boundary**: A future Premium paid tier (e.g. a Premium Pack on Agensi.io) is offered under a separate commercial license, distinct from this project's MIT open-source code. Buying it grants no extra rights to the repository code and no trademark license (see [COMMERCIAL.md](COMMERCIAL.md)).
+- **Use at your own risk**: Any consequence of using this tool (including content becoming unavailable due to platform policy changes, or account risk) is borne solely by the user.
 
 ### Disclaimer
 

@@ -42,6 +42,7 @@ import ipaddress
 import socket
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
+from typing import Protocol
 
 try:
     from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -67,7 +68,7 @@ import jinja2
 CST = timezone(timedelta(hours=8))
 
 # 版本号（单一来源，与 pyproject.toml 保持同步）
-__version__ = '2.6.4'
+__version__ = '2.6.5'
 
 # 通用 UA（所有请求都用）
 _UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -1979,6 +1980,21 @@ def fmt_ts(ts: int) -> str:
 # 主入口
 # ============================================================
 
+class SourceError(Exception):
+    """来源抽取失败的结构化错误（便于 Agent / 调用方机读错误码）。
+
+    - source: 出错的来源名（bilibili / youtube / ...）
+    - code:    机器可读错误码，如 E_EXTRACT_FAILED / E_DEP_MISSING / E_RISK
+    - cause:   原始异常（若有）
+    """
+
+    def __init__(self, source: str, code: str, message: str, cause: Exception | None = None):
+        self.source = source
+        self.code = code
+        self.cause = cause
+        super().__init__(f"[{code}] ({source}) {message}")
+
+
 def extract(link: str) -> dict:
     """自动检测来源并抽取。"""
     # 安全防护：作为库调用时也要经过 SSRF 校验（CLI 路径在 main 中已校验）
@@ -1986,20 +2002,27 @@ def extract(link: str) -> dict:
     source = detect_source(link)
     print(f"[检测] 来源类型: {source}", file=sys.stderr)
 
-    if source == 'bilibili':
-        return extract_bilibili(link)
-    elif source == 'github':
-        return extract_github(link)
-    elif source == 'weishi':
-        return extract_weishi(link)
-    elif source == 'youtube':
-        return extract_youtube(link)
-    elif source == 'xiaohongshu':
-        return extract_xiaohongshu(link)
-    elif source == 'douyin':
-        return extract_douyin(link)
-    else:
-        return extract_webpage(link)
+    try:
+        if source == 'bilibili':
+            return extract_bilibili(link)
+        elif source == 'github':
+            return extract_github(link)
+        elif source == 'weishi':
+            return extract_weishi(link)
+        elif source == 'youtube':
+            return extract_youtube(link)
+        elif source == 'xiaohongshu':
+            return extract_xiaohongshu(link)
+        elif source == 'douyin':
+            return extract_douyin(link)
+        else:
+            return extract_webpage(link)
+    except SourceError:
+        # 已是结构化错误，原样上抛
+        raise
+    except Exception as e:
+        # 将任意未捕获异常统一包装为 SourceError，便于调用方机读
+        raise SourceError(source, "E_EXTRACT_FAILED", f"{type(e).__name__}: {e}", cause=e)
 
 _IMA_CLIENT = None
 
@@ -2048,6 +2071,103 @@ def _upload_to_ima(data: dict, kb_name: str, source_url: str):
     except Exception as e:
         print(f"[IMA] 错误: {e}", file=sys.stderr)
         return False
+
+
+# ---------------------------------------------------------------------------
+# 知识库写入抽象（KnowledgeSink）
+# 目标：IMA 不再是单点故障——可配置多个 sink，任一成功即视为写入成功；
+#       新增零依赖的「本地 Markdown 后备」，防止 IMA 凭证/网络异常时数据丢失。
+# ---------------------------------------------------------------------------
+
+class KnowledgeSink(Protocol):
+    """知识库写入目标协议。"""
+    name: str
+
+    def upload(self, data: dict, source_url: str, md_path: str = "") -> bool:
+        """写入成功返回 True。"""
+        ...
+
+
+class IMARawSink:
+    """IMA「RAW」知识库 Markdown 上传（对应 --ima-raw）。"""
+    name = "IMA-RAW"
+
+    def upload(self, data: dict, source_url: str, md_path: str = "") -> bool:
+        return bool(_upload_to_ima_raw(data, source_url, md_path))
+
+
+class IMAUrlSink:
+    """IMA 指定知识库 URL 导入（对应 --upload-ima --ima-kb）。"""
+    name = "IMA-URL"
+
+    def __init__(self, kb_name: str):
+        self.kb_name = kb_name
+
+    def upload(self, data: dict, source_url: str, md_path: str = "") -> bool:
+        return bool(_upload_to_ima(data, self.kb_name, source_url))
+
+
+class LocalMarkdownSink:
+    """零依赖本地 Markdown 后备：将结果写入本地目录，防止 IMA 单点故障。"""
+    name = "LocalMarkdown"
+
+    def __init__(self, out_dir: str):
+        self.out_dir = out_dir
+
+    def upload(self, data: dict, source_url: str, md_path: str = "") -> bool:
+        try:
+            os.makedirs(self.out_dir, exist_ok=True)
+            title = data.get("title", "") or data.get("full_name", "extract")
+            safe = _sanitize_filename(title)
+            path = os.path.join(self.out_dir, f"{safe}.md")
+            if md_path and os.path.isfile(md_path):
+                with open(md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            else:
+                content = _build_markdown_content(data)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            print(f"[LocalMarkdown] ✅ 已写入本地 Markdown: {path}", file=sys.stderr)
+            return True
+        except Exception as e:
+            print(f"[LocalMarkdown] ❌ 写入失败: {e}", file=sys.stderr)
+            return False
+
+
+def _build_sinks(args) -> list:
+    """根据 CLI 参数构建 sink 列表（按优先级排序）。返回空列表表示参数有误。"""
+    sinks: list = []
+    if args.upload_ima:
+        if not args.ima_kb:
+            print("[upload] 错误: 请用 --ima-kb 指定目标知识库名称。", file=sys.stderr)
+            return []
+        sinks.append(IMAUrlSink(args.ima_kb.strip()))
+    if args.ima_raw:
+        sinks.append(IMARawSink())
+    if args.local_out:
+        sinks.append(LocalMarkdownSink(args.local_out))
+    return sinks
+
+
+def _run_sinks(sinks: list, data: dict, source_url: str, md_path: str = "") -> bool:
+    """依次尝试每个 sink；任一成功即返回 True；全失败返回 False。"""
+    if not sinks:
+        return True  # 无 sink 配置视为成功（无需写入）
+    any_ok = False
+    failed = []
+    for sink in sinks:
+        try:
+            if sink.upload(data, source_url, md_path):
+                any_ok = True
+                print(f"[upload] ✅ 写入成功: {sink.name}", file=sys.stderr)
+            else:
+                failed.append(sink.name)
+        except Exception as e:
+            failed.append(f"{sink.name}:{e}")
+            print(f"[upload] ⚠️ {sink.name} 异常: {e}", file=sys.stderr)
+    if failed:
+        print(f"[upload] ⚠️ 以下目标写入失败: {', '.join(failed)}", file=sys.stderr)
+    return any_ok
 
 
 def _build_context_for_source(data: dict) -> dict:
@@ -2239,14 +2359,74 @@ def _upload_to_ima_raw(data: dict, source_url: str, external_md_path: str = ""):
         return False
 
 
+def self_test() -> int:
+    """来源健康探测：检查依赖工具与关键端点可达性。
+
+    返回退出码：全部健康=0，有异常=1。不抽取任何内容。
+    用途：当某平台改接口/反爬时，对应端点会变红，便于即时发现护城河损耗。
+    """
+    print("=== URL Extract 来源健康探测 (self-test) ===\n", file=sys.stderr)
+
+    # 1. 依赖工具
+    print("[1/2] 依赖工具检查:", file=sys.stderr)
+    deps = {
+        "yt-dlp": shutil.which("yt-dlp") or shutil.which("yt-dlp.exe"),
+        "ffmpeg": shutil.which("ffmpeg"),
+        "whisper": shutil.which("whisper") or shutil.which("whisper-cpp"),
+        "defuddle": _get_defuddle_cmd()[0],
+        "node": shutil.which("node"),
+        "npm": shutil.which("npm"),
+    }
+    for name, path in deps.items():
+        status = "✅" if path else "⚠️ 缺失"
+        print(f"      {name:<10} {status}", file=sys.stderr)
+
+    # 2. 端点可达性（经 SSRF 防护的 safe_request 手动跟随跳转）
+    print("\n[2/2] 来源端点检查:", file=sys.stderr)
+    endpoints = {
+        "bilibili":     "https://api.bilibili.com/x/web-interface/view?bvid=BV1GJ411x7h7",
+        "github":       "https://api.github.com/",
+        "youtube":      "https://www.youtube.com/oembed?url=https://youtu.be/dQw4w9WgXcQ&format=json",
+        "xiaohongshu":  "https://www.xiaohongshu.com/",
+        "douyin":       "https://www.douyin.com/",
+        "webpage":      "https://example.com/",
+    }
+    any_fail = False
+    for name, url in endpoints.items():
+        try:
+            r = safe_request("GET", url, timeout=10)
+            code = getattr(r, "status_code", 0) if r is not None else None
+            ok = code is not None and code < 400
+            status = "✅" if ok else f"⚠️ HTTP {code}"
+            if not ok:
+                any_fail = True
+        except Exception as e:
+            status = f"❌ {type(e).__name__}"
+            any_fail = True
+        print(f"      {name:<12} {status}", file=sys.stderr)
+
+    # 3. IMA 凭证
+    ima_cfg = bool(os.environ.get("IMA_OPENAPI_CLIENTID") and os.environ.get("IMA_OPENAPI_APIKEY"))
+    print(f"\n[IMA] 凭证配置: {'✅ 已配置' if ima_cfg else '⚠️ 未配置（--ima-raw / --upload-ima 将不可用）'}", file=sys.stderr)
+
+    print("\n=== 探测完成 ===", file=sys.stderr)
+    if any_fail:
+        print("提示：带 ⚠️/❌ 的项目仍可运行，但相关来源可能降级或不可用。", file=sys.stderr)
+        return 1
+    print("全部来源健康。", file=sys.stderr)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=f'通用内容精华抽取 v{__version__} (defuddle + IMA 集成)')
-    parser.add_argument('link', help='链接（B站/GitHub/网页/微视）')
+    parser.add_argument('link', nargs='?', help='链接（B站/GitHub/网页/微视）。使用 --self-test 时可省略')
     parser.add_argument('--output', '-o', default='extract_result.json', help='输出JSON路径')
     parser.add_argument('--upload-ima', action='store_true', help='抽取后导入 URL 到 IMA 知识库')
     parser.add_argument('--ima-kb', type=str, default='', help='目标 IMA 知识库名称（需配合 --upload-ima）')
     parser.add_argument('--ima-raw', action='store_true', help='上传 Markdown 文档到 IMA「RAW」个人知识库')
     parser.add_argument('--ima-raw-md', type=str, default='', help='指定外部 Markdown 文件路径，优先上传该文件（配合 --ima-raw 使用，用于 agent 生成的高质量精华文档）')
+    parser.add_argument('--local-out', type=str, default='', help='额外将结果写入本地 Markdown 目录（零依赖后备，与 IMA 并行；防止 IMA 单点故障）')
+    parser.add_argument('--self-test', action='store_true', help='运行来源健康探测（依赖与端点可达性），不抽取任何内容')
     # B站 风控缓解参数（任一缺失则从对应环境变量读取，都缺失则不注入 Cookie）
     parser.add_argument('--sessdata', type=str, default=os.environ.get('BILIBILI_SESSDATA', ''), help='B站 SESSDATA Cookie，用于缓解风控（也可设环境变量 BILIBILI_SESSDATA）')
     parser.add_argument('--bili-jct', type=str, default=os.environ.get('BILIBILI_BILI_JCT', ''), help='B站 bili_jct Cookie（也可设环境变量 BILIBILI_BILI_JCT）')
@@ -2255,6 +2435,14 @@ def main():
     parser.add_argument('--lang', choices=['zh', 'en'], default='zh', help='输出语言：zh=简体中文（默认）/ en=English（影响 Markdown 渲染与 IMA 上传文档）')
     parser.add_argument('--md', default='', help='额外输出一份 Markdown 文档到指定路径（内容受 --lang 影响）')
     args = parser.parse_args()
+
+    # 健康探测模式：不抽取内容，仅检查依赖与端点
+    if args.self_test:
+        sys.exit(self_test())
+
+    # 非探测模式必须提供链接
+    if not args.link:
+        parser.error("需要提供链接，或使用 --self-test 进行健康探测")
 
     # 注入 B站 Cookie + wbi 开关（如果提供了 SESSDATA 或 wbi-sign on）
     if args.sessdata:
@@ -2304,21 +2492,13 @@ def main():
             f.write(md)
         print(f"\n✅ Markdown 已写出 -> {args.md}", file=sys.stderr)
 
-    # IMA 导入 (--ima-raw 优先)
-    if args.ima_raw:
+    # 知识库写入（多 sink，任一成功即 ok；全失败才 exit 1，避免单点故障）
+    sinks = _build_sinks(args)
+    if sinks:
         source_url = data.get('url', args.link)
-        ok = _upload_to_ima_raw(data, source_url, args.ima_raw_md)
+        ok = _run_sinks(sinks, data, source_url, args.ima_raw_md)
         if not ok:
-            print("[IMA] ❌ 上传到 RAW 知识库失败，退出码 1。", file=sys.stderr)
-            sys.exit(1)
-    elif args.upload_ima:
-        if not args.ima_kb:
-            print("[IMA] 错误: 请用 --ima-kb 指定目标知识库名称。", file=sys.stderr)
-            sys.exit(1)
-        source_url = data.get('url', args.link)
-        ok = _upload_to_ima(data, args.ima_kb.strip(), source_url)
-        if not ok:
-            print("[IMA] ❌ 导入知识库失败，退出码 1。", file=sys.stderr)
+            print("[upload] ❌ 所有知识库写入目标均失败，退出码 1。", file=sys.stderr)
             sys.exit(1)
 
 if __name__ == '__main__':
