@@ -1,6 +1,6 @@
 ---
 name: url-extract
-description: 把链接（B站视频 / YouTube / 小红书 / 抖音 / GitHub 仓库 / 一般网页 / 腾讯微视）变成结构化 Markdown 精华文档，可选上传到 IMA 知识库。触发词：精华、总结、提取、生成精华、B站精华、YouTube摘要、GitHub总结、小红书精华、抖音精华、网页精华。
+description: 把链接（B站视频 / YouTube / 小红书 / 抖音 / GitHub 仓库 / 一般网页 / 腾讯微视）变成结构化 Markdown 精华文档，可选上传到 IMA 知识库。v2.6 新增：小红书视频笔记无登录态自动 CDN→ASR 抽取完整转写。触发词：精华、总结、提取、生成精华、B站精华、YouTube摘要、GitHub总结、小红书精华、抖音精华、网页精华。
 allowed-tools: Read, Write, Bash, WebSearch
 ---
 
@@ -35,7 +35,7 @@ python3 extract.py "https://b23.tv/xxx" --sessdata "你的SESSDATA" --wbi-sign o
 |---|---|---|
 | **B站视频** | `bilibili.com` / `b23.tv` / `BV号` | 公共 API（视频信息/标签/字幕/评论）；SESSDATA cookie + wbi 签名 + tenacity 风控重试 |
 | **YouTube 视频** | `youtube.com/watch?v=` / `youtu.be/` | yt-dlp dump-json + 字幕（推荐装 yt-dlp），无 yt-dlp 时降级到 noembed.com 公开代理 |
-| **小红书笔记** | `xiaohongshu.com/discovery/item/` / `xhslink.com` / `xhslink.cn` | 重定向链解析 item_id（无登录态拿不到内容，强提示 WebSearch 补充） |
+| **小红书笔记** | `xiaohongshu.com/discovery/item/` / `xhslink.com` / `xhslink.cn` | 短链重定向 → 视频 CDN 直链 → ffmpeg → Apple Speech 转写（**v2.6 无需登录拿到完整转写**）；图文笔记降级到 item_id 元信息 |
 | **抖音视频** | `douyin.com/video/` / `v.douyin.com` / `iesdouyin.com` | 长链直接解析 video_id（无签名拿不到内容，强提示 WebSearch 补充） |
 | **GitHub 仓库** | `github.com` | gh CLI → REST API → defuddle 三级降级 |
 | **腾讯微视** | `weishi.qq.com` / 微信插件链接 | 微信 UA 模拟 + WebSearch 补充 |
@@ -87,11 +87,52 @@ python3 extract.py "<链接>" --output /tmp/extract_result.json
 - 字幕：自动下载 zh-Hans > zh-Hant > en 的 vtt 字幕，含轻量 WebVTT parser
 - 输出：`templates/youtube.md.j2`（类似 B 站结构）
 
-#### 小红书笔记（降级方案）
-- 现实：未登录/无 cookie 拿到的是空壳 HTML，defuddle 同样拿不到内容
-- 沙箱可做的：解析短链重定向链拿 item_id + type（note/video）
-- 模板：`templates/xiaohongshu.md.j2`（轻量，标记 partial=True）
-- 用户补充方式：复制笔记标题到 WebSearch 搜索，用 defuddle 抓第三方报道
+#### 小红书笔记（v2.6：视频笔记自动走 CDN→ASR 抽取完整转写）
+
+**关键发现（2026-09-09）**：小红书短链 `xhslink.cn/o/xxx` 重定向时携带视频 CDN 直链：
+- **iOS App 路径**：重定向到 `oia.xiaohongshu.com/oia?deeplink=...`，query 里是 URL-encoded JSON，含 h264/h265 `master_url`（带签名，无需登录就能下载）+ 封面 + 作者 UID
+- **Web 路径**：xhslink.cn 短链直接返回 SPA 页面，`window.__INITIAL_STATE__` 嵌入完整 note JSON，视频 CDN URL 明文（`/` 写作 `\u002F`）
+
+**抽取链路（自动运行，无需登录）**：
+
+```
+xhslink.cn 短链
+  ↓ curl 重定向 (User-Agent: iPhone Safari)
+oia.xiaohongshu.com/oia?deeplink=...
+  ↓ _parse_xhs_deeplink() 抽 h264 master_url + 封面
+下载 .mp4 (h264 优先，h265 兜底，限 100MB)
+  ↓ ffmpeg 抽 wav (16kHz 单声道)
+apple-speech transcribe --language zh-CN
+  ↓ STT 转写
+完整转写文本 + 时间分段 + 封面 + 元数据
+```
+
+**模板**：`templates/xiaohongshu.md.j2`（v2.6 升级：转写时显示完整文本 + 时间分段表格）
+
+**字段**（成功路径返回）：
+- `transcript`：完整转写文本
+- `transcript_segments`：时间分段列表（每段含 `timestamp` + `substring`）
+- `cover`：本地封面文件路径
+- `video_url`：CDN 视频 URL
+- `author_uid`：作者 UID
+- `partial=False`：成功时不标记部分抽取
+
+**降级**（CDN→ASR 链路失败时自动走）：
+- `partial=True` + `pipeline_status='failed'` + `pipeline_stage`（失败阶段）
+- 保留 v2.5 行为：只返回 item_id + 强 note 提示用户用 WebSearch 补充
+
+**控制开关**（env var）：
+- `XHS_VIDEO_CDN=0`：关闭视频 CDN 链路（默认开启）
+- `XHS_ASR_ON_DEVICE=1`：强制 on-device STT（默认 server-side，速度慢但质量高；on-device 实测 90s 视频只返回最后 30s）
+
+**外部依赖**（任意一个缺失时静默降级到 partial=True）：
+- `ffmpeg`：抽 wav
+- `apple-speech`：转写（macOS 14+ / iOS 17+ 自带）
+
+**限制**：
+- 仅视频笔记（`kind=='video'`）；图文笔记无 CDN 链接，走 partial 降级
+- 视频下载上限 100MB
+- ASR 转写超时 150s
 
 #### 抖音视频（降级方案）
 - 现实：需要 App 内置 UA + X-Sign 签名才能拿到内容
@@ -193,6 +234,48 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
   - 可选：`yt-dlp`（YouTube 完整元数据 + 字幕）
 - **Node.js 18+**（一般网页提取）：
   - 推荐：`defuddle`（`npm i -g defuddle`；脚本也支持自动探测 `npx defuddle`）
+- **ffmpeg**（PATH）：小红书视频抽取链路需要
+- **ASR backend**（小红书视频抽取需要，至少一个）：
+  - **Apple 平台**（Mac / iOS）：自动用 `apple-speech`（Minis 沙箱内置 / Mac 装 Minis 客户端即可）
+  - **跨平台**：装 `pip install openai-whisper`（自动 fallback）
+  - **云端**：设 `GOOGLE_CLOUD_API_KEY` 环境变量（Google Cloud Speech-to-Text）
+
+## ASR Backend 配置（v2.6.1 起跨平台兼容）
+
+设计原则——**全平台兼容是基础，apple-speech 是 Mac/iOS 检测到时的优选路径，不限制项目整体功能**。
+
+| 平台 | 推荐 ASR backend | 安装方法 |
+|---|---|---|
+| **Mac / iOS（Minis 沙箱）** | apple-speech（默认优选） | 沙箱内置；Mac 装 Minis 客户端即可 |
+| **Linux / Windows / 其它 Mac** | whisper（默认 fallback） | `pip install openai-whisper` |
+| **任意平台（云端）** | google-cloud-speech | 设 `GOOGLE_CLOUD_API_KEY` env var |
+
+**控制开关**（env var）：
+
+| env var | 默认 | 说明 |
+|---|---|---|
+| `XHS_ASR_BACKEND` | `auto` | `auto` 按优先级尝试可用 backend；也可强制指定 `apple-speech` / `whisper` / `google-cloud-speech` |
+| `XHS_ASR_ON_DEVICE` | 未设 | apple-speech 专用：`1` 开启 on-device STT（实测有截断，默认 server-side） |
+| `WHISPER_MODEL` | `base` | whisper 模型选择：`tiny` / `base` / `small` / `medium` / `large` |
+
+**代码层面**：
+
+- 新模块 `xhs_asr.py` 定义 `ASRBackend` 抽象基类
+- 三个实现：`AppleSpeechBackend` / `WhisperBackend` / `GoogleCloudSpeechBackend`
+- 调度函数：`transcribe_with_fallback(audio_path, language)` 自动按优先级尝试
+- 检测函数：`is_apple_platform()` 返回 `True` 当且仅当 `apple-speech` 二进制存在
+
+**Auto 模式 fallback 链**：
+
+```
+1. apple-speech（Mac/iOS）→ 可用时优先
+  ↓ 失败 / 不可用
+2. whisper（任意平台）→ 装了 openai-whisper 即可用
+  ↓ 失败 / 不可用
+3. google-cloud-speech（云端）→ 有 API key 即可用
+  ↓ 全失败
+→ pipeline stage=transcribe，partial=True 降级
+```
 
 ## 项目结构
 
@@ -202,7 +285,7 @@ url-extract/
 ├── README.md                 # 项目说明
 ├── CHANGELOG.md              # 完整版本历史
 ├── REFACTOR_PROGRESS.md      # 2026-08-07 重构工作汇报
-├── extract.py                # 主入口脚本（v2.5.2：7 来源 + B 站风控 + 130 测试覆盖）
+├── extract.py                # 主入口脚本（v2.6：XHS 视频 CDN→ASR + 147 测试覆盖）
 ├── ima_client.py             # IMA 客户端 v1.4
 ├── setup.py                  # IMA 凭证引导
 ├── pyproject.toml            # Python 包元数据
@@ -215,12 +298,13 @@ url-extract/
 │   ├── youtube.md.j2
 │   ├── xiaohongshu.md.j2
 │   └── douyin.md.j2
-├── tests/                    # 130 个单元测试
+├── tests/                    # 147 个单元测试
 │   ├── test_bilibili_cookie_retry.py   (24 用例)
-│   ├── test_new_sources.py             (32 用例)
+│   ├── test_new_sources.py             (43 用例，含 XHS v2.6 16 个)
 │   ├── test_ima_client.py              (7 用例)
 │   ├── test_ima_retry.py               (22 用例)
 │   ├── test_cos_sdk_etag.py            (6 用例)
+│   ├── test_defuddle_fix.py            (5 用例)
 │   ├── test_url_validation.py          (17 用例)
 │   ├── test_refactor_13.py             (12 用例)
 │   ├── test_templates.py               (10 用例)
@@ -230,7 +314,7 @@ url-extract/
 
 ## 测试与 CI
 
-- **130 个测试**覆盖：B 站风控 / 新来源 / IMA 重试 / COS SDK ETag / URL 验证 / 模板渲染
+- **147 个测试**覆盖：B 站风控 / 新来源（含 XHS v2.6 视频抽取）/ IMA 重试 / COS SDK ETag / 模板渲染 / URL 验证 / defuddle 修复
 - **CI**: GitHub Actions 跑 pytest 矩阵（Python 3.10 / 3.11 / 3.12）
 - **本地跑测试**：
   ```bash
