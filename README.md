@@ -30,7 +30,7 @@
 
 <a id="-简体中文"></a>
 
-## 🇨🇳 简体中文
+## 简体中文
 
 ### 这是什么？
 
@@ -172,7 +172,7 @@ python3 extract.py "https://b23.tv/xxx" -o result.json --ima-raw
 
 <a id="-english"></a>
 
-## 🇬🇧 English
+## English
 
 ### What is this?
 
