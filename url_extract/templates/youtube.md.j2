@@ -8,6 +8,24 @@
 
 ---
 
+{% if concise %}
+## 字幕内容
+
+{% if subtitle.available %}
+{{ subtitle.full_text or subtitle.text }}
+{% else %}
+> ⚠️ {{ subtitle.note }}
+>
+> **建议**：复制视频标题到 WebSearch 搜索，用 defuddle 抓取第三方报道/字幕组资源补充内容。
+{% endif %}
+
+---
+
+## 视频描述
+
+{{ desc or description or '（无描述）' }}
+
+{% else %}
 ## 一、视频概览
 
 | 项目 | 内容 |
@@ -44,6 +62,7 @@
 
 - 原始链接：{{ url }}
 
+{% endif %}
 ---
 
 > ⚠️ **重要声明**

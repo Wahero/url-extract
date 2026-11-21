@@ -7,6 +7,29 @@
 
 ---
 
+{% if concise %}
+{% if desc %}
+## Description
+
+{{ desc }}
+
+{% endif %}
+{% if subtitle.available and subtitle.full_text %}
+## Video Subtitles (Full Transcript)
+
+{% if subtitle.lan %}> Language: {{ subtitle.lan }}
+{% endif %}
+{{ subtitle.full_text }}
+
+{% else %}
+## Highlights
+
+> ⚠️ {{ subtitle.note or 'This video has no subtitles uploaded.' }}
+
+> The uploader did not provide subtitles and the description is empty. Highlights would need to be inferred by an AI from the title, tags, and comment discussion, or supplied via the `--ima-raw-md` parameter as an externally generated full highlights Markdown document for upload.
+
+{% endif %}
+{% else %}
 ## 1. Video Overview
 
 | Item | Content |
@@ -60,6 +83,7 @@
 
 - Original link: {{ url }}
 
+{% endif %}
 ---
 
 > ⚠️ **Important Disclaimer**

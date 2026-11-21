@@ -48,7 +48,7 @@
 > **Video CDN→ASR pipeline failure details**: stage=`{{ pipeline_stage }}`, error=`{{ pipeline_error[:200] if pipeline_error else '' }}`
 {% endif %}
 {% endif %}
-
+{% if not concise %}
 ---
 
 ## References
@@ -62,7 +62,7 @@
 {% endif %}{% if pipeline_files.audio %}- Audio file: `{{ pipeline_files.audio }}`
 {% endif %}{% if pipeline_files.cover %}- Cover file: `{{ pipeline_files.cover }}`
 {% endif %}{% endif %}
-
+{% endif %}
 ---
 
 > ⚠️ **Important Disclaimer**

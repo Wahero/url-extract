@@ -7,6 +7,30 @@
 
 ---
 
+{% if concise %}
+{% if desc %}
+## 视频简介
+
+{{ desc }}
+
+{% endif %}
+{% if subtitle.available and subtitle.full_text %}
+## 视频字幕（完整转录）
+
+{% if subtitle.lan %}> 语言：{{ subtitle.lan }}
+{% endif %}
+{{ subtitle.full_text }}
+
+{% else %}
+## 精华内容
+
+> ⚠️ {{ subtitle.note or '该视频未提供字幕' }}
+
+> 该视频 UP 主未上传字幕，视频简介为空。精华内容需由 AI 基于视频标题、标签及评论区讨论推断还原，
+> 或通过 `--ima-raw-md` 参数提供外部生成的完整精华 Markdown 文档上传。
+
+{% endif %}
+{% else %}
 ## 一、视频概览
 
 | 项目 | 内容 |
@@ -61,6 +85,7 @@
 
 - 原始链接：{{ url }}
 
+{% endif %}
 ---
 
 > ⚠️ **重要声明**

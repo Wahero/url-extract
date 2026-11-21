@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.7.0] — 2026-11-21
+
+### Added
+- **精简模式 `--concise`**：Markdown 只输出「内容主体 + 末尾重要声明」，省略概览表 / 评论 / 参考资料等其余章节。
+  - 透过 `data['concise']` 传递，**同时作用于 `--md`、`--local-out`、`--ima-raw`**，各 sink 无需改动。
+  - `_build_markdown_content(data, concise=False)` 新增 `concise` 形参；`_build_context_for_source` 新增 `concise` 上下文字段。
+  - 14 套模板（7 中文 + 7 英文）全部支持 `{% if concise %}` 分支；未知来源的通用 fallback 渲染器同步支持。
+  - **重要声明在任何模式下都保留**（SKILL.md 硬性规则新增第 11 条）。
+  - `--local-out` 在精简模式下写出的文件名自动加 `_精简` 后缀（英文版 `_concise`），避免与完整版互相覆盖。
+  - JSON 输出新增 `markdown_mode` 字段（`concise` / `full`）。
+  - **README / SKILL.md 新增精简模式说明**，含各来源「保留 / 省略」对照表；明确标注 **精简 ≠ 摘要**（只做结构裁剪，不改写、不概括内容）。
+  - **20 个新单测**（`tests/test_concise_mode.py`）：覆盖 zh + en 两套模板、重要声明保留、`data['concise']` 通路、sink 文件名后缀。
+
+### Fixed
+- **Windows GBK 解码缺陷**：`run_defuddle()` 用 `subprocess.run(text=True)` 未指定 `encoding`，子行程 stdout 按系统 ANSI 码页（cp936/GBK）解码 → 中文网页触发 `UnicodeDecodeError` → 被误判为「defuddle 不可用」，结果标题为空、正文全丢。已显式指定 `encoding='utf-8', errors='replace'`。
+  - 同文件另修两处同类缺陷：yt-dlp 分支临时文件按默认码页写入（后续却用 UTF-8 读）、`extract_github()` 的 `gh` CLI 调用未指定编码。
+
+### Changed
+- **版本号同步**：`url_extract/extract.py` 与 `pyproject.toml` 均升至 `2.7.0`。
+- **README / SKILL.md 项目结构与测试数修正**：此前仍写「147 个测试」与旧的平面 `templates/` 布局，实际为 239 个测试 + `url_extract/` 套件 + 14 套模板。
+- 全量 **239 passed**（原 219 + 新 20）。
+
 ## [2.6.5] — 2026-10-28
 
 ### A3 法律 / 合规硬化

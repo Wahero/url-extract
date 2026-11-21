@@ -6,6 +6,18 @@
 
 ---
 
+{% if concise %}
+## README
+
+{% if content_markdown %}
+{{ content_markdown }}
+
+{% else %}
+{% if note %}
+> ⚠️ {{ note }}
+
+{% endif %}{% endif %}
+{% else %}
 ## 一、仓库概览
 
 | 项目 | 内容 |
@@ -34,6 +46,7 @@
 
 - 原始链接：{{ url }}
 
+{% endif %}
 ---
 
 > ⚠️ **重要声明**

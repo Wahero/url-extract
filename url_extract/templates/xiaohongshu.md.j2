@@ -49,6 +49,7 @@
 {% endif %}
 {% endif %}
 
+{% if not concise %}
 ---
 
 ## 参考资料
@@ -62,7 +63,7 @@
 {% endif %}{% if pipeline_files.audio %}- 音频文件：`{{ pipeline_files.audio }}`
 {% endif %}{% if pipeline_files.cover %}- 封面文件：`{{ pipeline_files.cover }}`
 {% endif %}{% endif %}
-
+{% endif %}
 ---
 
 > ⚠️ **重要声明**

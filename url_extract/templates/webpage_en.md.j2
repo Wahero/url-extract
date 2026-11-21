@@ -8,6 +8,12 @@
 
 ---
 
+{% if concise %}
+## Body Content
+
+{{ content_markdown }}
+
+{% else %}
 ## 1. Overview
 
 | Item | Content |
@@ -35,6 +41,7 @@
 
 - Original link: {{ url }}
 
+{% endif %}
 ---
 
 > ⚠️ **Important Disclaimer**

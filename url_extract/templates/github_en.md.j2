@@ -6,6 +6,18 @@
 
 ---
 
+{% if concise %}
+## README
+
+{% if content_markdown %}
+{{ content_markdown }}
+
+{% else %}
+{% if note %}
+> ⚠️ {{ note }}
+
+{% endif %}{% endif %}
+{% else %}
 ## 1. Repository Overview
 
 | Item | Content |
@@ -34,6 +46,7 @@
 
 - Original link: {{ url }}
 
+{% endif %}
 ---
 
 > ⚠️ **Important Disclaimer**
