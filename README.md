@@ -16,11 +16,11 @@
 
 <sub align="center">头图为内置 SMIL 动效的 SVG（无 JS、无外部依赖）。若你的浏览器/GitHub 未播放动画，会静态显示，构图不受影响；静态版见 <a href="assets/url-extract-banner.png">PNG</a>。</sub>
 
-[![Tests](https://img.shields.io/badge/tests-213%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-239%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![CI](https://github.com/Wahero/url-extract/actions/workflows/test.yml/badge.svg)](.github/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.6.5-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.7.0-blue)](CHANGELOG.md)
 
 **[简体中文](#-简体中文) · [English](#-english)**
 
@@ -97,6 +97,26 @@
 
 **你能拿它做什么：** 直接读 / 存成 Markdown / 丢进知识库 / 交给 AI 继续加工。
 
+### 不想看那么多章节？用 `--concise`
+
+默认输出是上面那套三段式（概览 + 内容 + 参考资料）。如果你只想要**内容本身**，加 `--concise`：
+
+```markdown
+# 标题
+
+> 来源 · 作者 · 时长 · 发布时间
+
+## 二、完整字幕（转录）
+    只留内容主体，概览表 / 评论 / 参考资料全部省略
+
+---
+
+> ⚠️ 重要声明
+    始终保留
+```
+
+> **精简 ≠ 摘要。** `--concise` 只做**结构裁剪**（去掉概览表、评论、参考资料），**不删改一个字的内容**，也不做任何 AI 概括。字幕有多长，精简版就有多长。
+
 ### 接上知识库 / 存到本地
 
 | 你想怎么做 | 效果 |
@@ -105,8 +125,10 @@
 | 想自己先改一改再入库 | `--ima-raw --ima-raw-md ./你的文档.md`：优先上传你的版本 |
 | 只想**记下这条原始链接** | `--upload-ima`：把网址导入指定知识库 |
 | 想存成**本地 Markdown 文件**（不依赖任何云服务） | `--local-out ./out`：结果写入该目录，零依赖、可离线，即使 IMA 不可用也不丢数据 |
+| 只想要**内容主体**，不要概览/评论/参考资料 | `--concise`：精简模式，可与上面任意一项叠加使用 |
 
 > 多个目标可同时生效：例如 `--ima-raw --local-out ./out`，云端与本地各存一份。
+> 精简模式下 `--local-out` 写出的文件名会自动加 `_精简` 后缀（英文版为 `_concise`），不会与完整版互相覆盖。
 
 **入库准备（只需一次）：** 到 [IMA 开放平台](https://ima.qq.com/agent-interface) 微信扫码登录，拿到 Client ID 与 API Key，设成环境变量即可。**凭证不会写进任何文件、不会留存，会话结束即失效。**
 
@@ -137,6 +159,10 @@ python3 extract.py "https://b23.tv/xxx" -o result.json --local-out ./out
 # 只导出单篇 Markdown 文件
 python3 extract.py "https://b23.tv/xxx" -o result.json --md ./note.md
 
+# 精简模式：只保留内容主体 + 重要声明，省略概览/评论/参考资料
+python3 extract.py "https://b23.tv/xxx" -o result.json --concise
+python3 extract.py "https://b23.tv/xxx" -o result.json --concise --local-out ./out
+
 # 一键上传到 IMA 知识库（需先设置凭证）
 export IMA_OPENAPI_CLIENTID="你的ClientID"
 export IMA_OPENAPI_APIKEY="你的APIKey"
@@ -159,7 +185,7 @@ python3 extract.py --self-test
 | **YouTube 字幕** | 依赖自动生成的中文字幕；**完全没有字幕时无法转写** |
 | **小红书语音转写** | macOS / iOS 走 Apple Speech；**Windows / Linux 需自行安装 ffmpeg + openai-whisper（或 whisper.cpp）** 才能启用完整转写，否则仅返回基础信息 |
 | **语音转写本身** | 机器识别，难免有错字漏字。**医学、法律、金融等专业内容，请务必回看原视频或咨询专业人士** |
-| **内容精炼 / 摘要** | 当前版本**输出完整字幕 / 正文，不做 AI 摘要**；如需浓缩要点，请用宿主 AI 处理，或等待后续 Premium 版的可选精炼功能 |
+| **内容精炼 / 摘要** | 当前版本**输出完整字幕 / 正文，不做 AI 摘要**；`--concise` 只是**结构裁剪**（省掉概览表 / 评论 / 参考资料），**不改写、不概括内容**。如需浓缩要点，请用宿主 AI 处理，或等待后续 Premium 版的可选精炼功能 |
 | **内容来源** | 当某条链接本身无字幕、无正文时，部分内容会由公开资料整合而来，**并非全部来自原视频的音频或画面** —— 需要精确引用时请核对原文 |
 
 一句话：**它是一把很好的"省时间"工具，不是"替代原始信息"的工具。**
@@ -265,6 +291,26 @@ A fixed three-part structure — clean, no noise, no format junk:
 
 **What you can do with it:** read it / save as Markdown / feed your knowledge base / hand it to another AI.
 
+### Don't want all those sections? Use `--concise`
+
+The default output is the three-part structure above (overview + content + references). If you only want **the content itself**, add `--concise`:
+
+```markdown
+# Title
+
+> Source · Author · Duration · Published
+
+## 2. Full Transcript
+    Content body only — the overview table, comments, and references are dropped
+
+---
+
+> ⚠️ Important Disclaimer
+    Always kept
+```
+
+> **Concise ≠ summary.** `--concise` only **trims structure** (drops the overview table, comments, and references). It **does not rewrite or summarize a single word** of the content. The transcript is as long as it was.
+
 ### Connect a knowledge base / save locally
 
 | What you want | How |
@@ -273,8 +319,10 @@ A fixed three-part structure — clean, no noise, no format junk:
 | Edit it yourself first | `--ima-raw --ima-raw-md ./your.md`: your version takes priority |
 | Just **remember the link** | `--upload-ima`: imports the URL into a chosen knowledge base |
 | Save as a **local Markdown file** (no cloud needed) | `--local-out ./out`: writes results to that folder — zero-dependency, offline, nothing lost even if IMA is down |
+| Only want the **content body**, no overview/comments/references | `--concise`: structural trimming, combinable with any of the above |
 
 > Multiple targets can combine: e.g. `--ima-raw --local-out ./out` keeps one copy in the cloud and one on disk.
+> In concise mode, files written by `--local-out` get a `_concise` suffix so they never overwrite the full version.
 
 **One-time setup:** sign in at the [IMA Open Platform](https://ima.qq.com/agent-interface) with WeChat, get a Client ID and API Key, and set them as environment variables. **Credentials are never written to any file and never persisted — they expire when the session ends.**
 
@@ -305,6 +353,10 @@ python3 extract.py "https://b23.tv/xxx" -o result.json --local-out ./out
 # Export a single Markdown file only
 python3 extract.py "https://b23.tv/xxx" -o result.json --md ./note.md
 
+# Concise mode: content body + disclaimer only, no overview/comments/references
+python3 extract.py "https://b23.tv/xxx" -o result.json --concise
+python3 extract.py "https://b23.tv/xxx" -o result.json --concise --local-out ./out
+
 # One-click upload to IMA (set credentials first)
 export IMA_OPENAPI_CLIENTID="your-client-id"
 export IMA_OPENAPI_APIKEY="your-api-key"
@@ -327,7 +379,7 @@ We'd rather tell you now than have you find out later.
 | **YouTube subtitles** | Depends on auto-generated Chinese subtitles; **no subtitles = no transcript** |
 | **Xiaohongshu speech-to-text** | macOS / iOS use Apple Speech; **Windows / Linux require ffmpeg + openai-whisper (or whisper.cpp)** to enable full transcription, otherwise only basic info is returned |
 | **Transcription accuracy** | Machine ASR inevitably has errors. **For medical, legal, or financial content, always check the original video or consult a professional** |
-| **Summarization / refinement** | The current version outputs the **full transcript / body text, without AI summarization**. For condensed bullet points, use your host AI, or wait for the optional refinement feature in a future Premium version. |
+| **Summarization / refinement** | The current version outputs the **full transcript / body text, without AI summarization**. `--concise` only **trims structure** (drops the overview table, comments, and references) — it **never rewrites or condenses the content**. For condensed bullet points, use your host AI, or wait for the optional refinement feature in a future Premium version. |
 | **Content sourcing** | When a link has no subtitles or body text, parts of the digest are compiled from public sources — **not all from the video's own audio or visuals**. Verify against the original before precise citation |
 
 In one sentence: **this is a great time-saving tool, not a replacement for the original content.**

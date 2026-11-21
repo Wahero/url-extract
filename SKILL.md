@@ -1,6 +1,6 @@
 ---
 name: url-extract
-description: 把链接（B站视频 / YouTube / 小红书 / 抖音 / GitHub 仓库 / 一般网页 / 腾讯微视）变成结构化 Markdown 精华文档，可选上传到 IMA 知识库。v2.6 新增：小红书视频笔记无登录态自动 CDN→ASR 抽取完整转写。触发词：精华、总结、提取、生成精华、B站精华、YouTube摘要、GitHub总结、小红书精华、抖音精华、网页精华。
+description: 把链接（B站视频 / YouTube / 小红书 / 抖音 / GitHub 仓库 / 一般网页 / 腾讯微视）变成结构化 Markdown 精华文档，可选上传到 IMA 知识库。v2.7 新增：精简模式（--concise），只输出内容主体 + 末尾「重要声明」。触发词：精华、总结、提取、生成精华、精简、精简精华、简洁、concise、B站精华、YouTube摘要、GitHub总结、小红书精华、抖音精华、网页精华。
 allowed-tools: Read, Write, Bash, WebSearch
 ---
 
@@ -11,6 +11,23 @@ allowed-tools: Read, Write, Bash, WebSearch
 把任何链接变成一篇干净、结构化的 Markdown 精华文档。**支持 7 种来源**：B 站视频、YouTube、小红书、抖音、GitHub 仓库、一般网页、腾讯微视。**`--ima-raw` 上传完整 Markdown 到 IMA「RAW」知识库；`--ima-raw-md` 支持外部 Markdown 文件优先上传。**
 
 > ⚠️ **学术测试版（Academic Preview）** — 当视频无字幕时，部分要点来自社区资料整合而非视频原声。正式参考请对照原始视频核实。
+
+## 调用方式与模式选择
+
+| 调用形式 | 行为 |
+|---|---|
+| `/url-extract 精华，<URL>` | **完整模式**：结构化精华文档（概览 + 内容 + 参考资料 + 重要声明） |
+| `/url-extract 精华，精简，<URL>` | **精简模式**：只保留内容主体 + 末尾「重要声明」，省略概览表 / 评论 / 参考资料等其余章节 |
+| `/url-extract 精华，精简，<URL>` ＋ 上传 IMA | 上传**精简版**到 IMA「RAW」知识库 |
+
+**识别要点**：指令里出现「精简」「精简模式」「简洁」「concise」→ 一律走精简模式，不要生成完整版。
+命令行等价写法：
+
+```bash
+python3 extract.py "<URL>" --output result.json --md ./out.md --concise
+```
+
+精简 ≠ 摘要：只做**结构裁剪**，不改写、不概括内容。
 
 ## 零配置快速上手
 
@@ -157,9 +174,30 @@ apple-speech transcribe --language zh-CN
 
 ### 步骤 3：生成 Markdown 文档
 
-直接调用 `extract.py` 末尾的 `_build_markdown_content()` 即可（脚本本身已封装），或参照 `templates/` 下的来源模板。
+直接调用 `extract.py` 末尾的 `_build_markdown_content(data, concise=False)` 即可（脚本本身已封装），或参照 `templates/` 下的来源模板。
 
 输出文件名：`<来源前缀>精华_<标题>.md`（前缀见 `extract._SOURCE_PREFIX`）
+
+#### 精简模式（v2.7）
+
+`--concise` 让 Markdown 只保留「内容主体 + 末尾重要声明」。透过 `data['concise']` 传递，**同时作用于 `--md`、`--local-out` 与 `--ima-raw`**，无需改各 sink。
+
+各来源在精简模式下的保留 / 省略：
+
+| 来源 | 保留 | 省略 |
+|---|---|---|
+| B站视频 | 视频简介、字幕全文（无字幕则「精华内容」占位提示） | 视频概览表、高赞评论、参考资料 |
+| YouTube | 字幕内容、视频描述 | 视频概览表、参考资料 |
+| 一般网页 | 正文内容 | 概览表、参考资料 |
+| GitHub | README | 仓库概览表、参考资料 |
+| 小红书 | 完整转写文本 + 时间分段表（或「部分抽取」提示） | 封面图、参考资料 |
+| 抖音 | 「部分抽取」提示与补充指引 | 参考资料 |
+| 腾讯微视 | 视频信息与 WebSearch 补充指引 | 参考资料 |
+
+> 精简模式**始终保留**末尾的「重要声明」（学术测试版声明）——这是硬性规则，不可省略。
+> 精简模式下章节标题不带「一、二、三」序号（章节数减少后编号会断档且无意义）。
+> `--local-out` 在精简模式下写出的文件名自动加 `_精简` 后缀（英文版 `_concise`），避免与完整版互相覆盖。
+> JSON 输出会记录 `markdown_mode` 字段（`concise` / `full`）。
 
 ---
 
@@ -175,6 +213,7 @@ apple-speech transcribe --language zh-CN
 8. **GitHub 限流降级**：API 限流时自动降级到 defuddle
 9. **优先 defuddle**：一般网页和内容补充优先 defuddle 而非 WebFetch
 10. **文档尾部声明**：所有 MD 必须附学术测试版声明（即使字幕完整）
+11. **精简模式不豁免声明**：`--concise` 只省略「概览表 / 评论 / 参考资料」等章节，末尾「重要声明」必须保留
 
 ---
 
@@ -284,25 +323,27 @@ python3 extract.py "https://b23.tv/xxx" --output result.json
 ```
 url-extract/
 ├── SKILL.md                  # 本文件
-├── README.md                 # 项目说明
+├── README.md                 # 项目说明（双语）
 ├── CHANGELOG.md              # 完整版本历史
+├── SECURITY.md               # 安全策略与漏洞报告
+├── COMMERCIAL.md             # 商业许可边界
 ├── REFACTOR_PROGRESS.md      # 2026-08-07 重构工作汇报
 ├── url_extract/              # 套件本體（extract.py / ima_client.py / xhs_asr.py / templates/）
+│   └── templates/            # Markdown 模板（Jinja2，14 个 = 7 中文 + 7 英文）
+│       ├── bilibili.md.j2 / bilibili_en.md.j2
+│       ├── github.md.j2 / github_en.md.j2
+│       ├── webpage.md.j2 / webpage_en.md.j2
+│       ├── weishi.md.j2 / weishi_en.md.j2
+│       ├── youtube.md.j2 / youtube_en.md.j2
+│       ├── xiaohongshu.md.j2 / xiaohongshu_en.md.j2
+│       └── douyin.md.j2 / douyin_en.md.j2
 ├── extract.py                # 向後相容入口（= url_extract.extract）
 ├── ima_client.py             # 向後相容入口
 ├── xhs_asr.py                # 向後相容入口
 ├── tools/ima_setup.py        # IMA 凭证引导
 ├── pyproject.toml            # Python 包元数据
 ├── requirements.txt          # 依赖清单
-├── templates/                # Markdown 模板（Jinja2，7 个）
-│   ├── bilibili.md.j2
-│   ├── github.md.j2
-│   ├── webpage.md.j2
-│   ├── weishi.md.j2
-│   ├── youtube.md.j2
-│   ├── xiaohongshu.md.j2
-│   └── douyin.md.j2
-├── tests/                    # 147 个单元测试
+├── tests/                    # 239 个单元测试
 │   ├── test_bilibili_cookie_retry.py   (24 用例)
 │   ├── test_new_sources.py             (43 用例，含 XHS v2.6 16 个)
 │   ├── test_ima_client.py              (7 用例)
@@ -312,13 +353,15 @@ url-extract/
 │   ├── test_url_validation.py          (17 用例)
 │   ├── test_refactor_13.py             (12 用例)
 │   ├── test_templates.py               (10 用例)
+│   ├── test_concise_mode.py            (20 用例，精简模式 zh + en)
+│   ├── test_a2_hardening.py / test_security_ssrf.py
 │   └── fixtures/
 └── .github/workflows/test.yml   # GitHub Actions CI（pytest 3.10/3.11/3.12）
 ```
 
 ## 测试与 CI
 
-- **147 个测试**覆盖：B 站风控 / 新来源（含 XHS v2.6 视频抽取）/ IMA 重试 / COS SDK ETag / 模板渲染 / URL 验证 / defuddle 修复
+- **239 个测试**覆盖：B 站风控 / 新来源（含 XHS v2.6 视频抽取）/ IMA 重试 / COS SDK ETag / 模板渲染 / URL 验证 / defuddle 修复 / **精简模式（--concise，zh + en）** / SSRF 硬化
 - **CI**: GitHub Actions 跑 pytest 矩阵（Python 3.10 / 3.11 / 3.12）
 - **本地跑测试**：
   ```bash

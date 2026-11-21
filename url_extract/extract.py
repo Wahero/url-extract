@@ -68,7 +68,7 @@ import jinja2
 CST = timezone(timedelta(hours=8))
 
 # 版本号（单一来源，与 pyproject.toml 保持同步）
-__version__ = '2.6.5'
+__version__ = '2.7.0'
 
 # 通用 UA（所有请求都用）
 _UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -528,7 +528,7 @@ def _run_ytdlp_combined(url: str, timeout: int = 60) -> dict | None:
             with tempfile.NamedTemporaryFile(mode='w+', suffix='.log', delete=False) as stderr_f:
                 stderr_path = stderr_f.name
             try:
-                with open(stdout_path, 'w') as out_f, open(stderr_path, 'w') as err_f:
+                with open(stdout_path, 'w', encoding='utf-8') as out_f, open(stderr_path, 'w', encoding='utf-8') as err_f:
                     proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, text=True)
                     try:
                         proc.wait(timeout=timeout)
@@ -675,6 +675,7 @@ def run_defuddle(url: str, format: str = 'json') -> dict | str | None:
         result = subprocess.run(
             cmd_args,
             capture_output=True, text=True, timeout=30,
+            encoding='utf-8', errors='replace',
             cwd=_cwd,
             env=env,
             shell=_shell,
@@ -1050,6 +1051,7 @@ def extract_github(link: str) -> dict:
             ['gh', 'repo', 'view', f'{owner}/{repo}',
              '--json', 'name,description,stargazerCount,forkCount,primaryLanguage,licenseInfo,repositoryTopics,createdAt,updatedAt,homepageUrl'],
             capture_output=True, text=True, timeout=20,
+            encoding='utf-8', errors='replace',
         )
         if result.returncode == 0:
             d = json.loads(result.stdout)
@@ -2119,6 +2121,9 @@ class LocalMarkdownSink:
             os.makedirs(self.out_dir, exist_ok=True)
             title = data.get("title", "") or data.get("full_name", "extract")
             safe = _sanitize_filename(title)
+            # v2.7：精简版加后缀，避免与完整版同名互相覆盖
+            if data.get("concise"):
+                safe += "_concise" if data.get("lang") == "en" else "_精简"
             path = os.path.join(self.out_dir, f"{safe}.md")
             if md_path and os.path.isfile(md_path):
                 with open(md_path, "r", encoding="utf-8") as f:
@@ -2174,6 +2179,9 @@ def _build_context_for_source(data: dict) -> dict:
     """
     把抽取结果按来源归整为模板可直接用的 context。
     模板在 templates/<source>.md.j2，渲染时仅关心模板里出现的字段。
+
+    v2.7 新增 concise：True 时模板只输出「内容主体 + 重要声明」，
+    省略概览表 / 评论 / 参考资料等其余章节。
     """
     source = data.get('source', '')
     title = data.get('title', '') or data.get('full_name', '') or '未命名'
@@ -2182,6 +2190,7 @@ def _build_context_for_source(data: dict) -> dict:
     return {
         'source': source,
         'lang': lang,
+        'concise': bool(data.get('concise', False)),
         'title': title,
         'url': data.get('url', ''),
         'version': data.get('version', __version__),
@@ -2266,20 +2275,25 @@ def _render_template(source: str, context: dict) -> str:
         lines += ["## 简介", "", context['desc'], ""]
     if context.get('content_markdown'):
         lines += ["## 内容", "", context['content_markdown'], ""]
-    lines += ["## 参考资料", "", f"- 原始链接：{context['url']}", "",
-              "---", "",
+    if not context.get('concise'):
+        lines += ["## 参考资料", "", f"- 原始链接：{context['url']}", ""]
+    lines += ["---", "",
               f"*本文档由 url-extract v{context['version']} 自动生成。*"]
     return "\n".join(lines)
 
 
-def _build_markdown_content(data: dict) -> str:
+def _build_markdown_content(data: dict, concise: bool = False) -> str:
     """
     将抽取结果组装成完整的结构化 Markdown 文档（v2.5.2：模板拆分为 templates/*.md.j2）。
 
     - bilibili / github / webpage / weishi → 各自模板
     - 未知 source → 通用 fallback
+    - v2.7：concise=True（或 data['concise'] 为真）→ 精简模式，
+      只保留内容主体与末尾的「重要声明」，省略其余章节。
     """
     ctx = _build_context_for_source(data)
+    if concise:
+        ctx['concise'] = True
     return _render_template(ctx['source'], ctx)
 
 
@@ -2434,6 +2448,7 @@ def main():
     parser.add_argument('--wbi-sign', choices=['on', 'off'], default='off', help='是否对 B站 API 请求加 wbi 签名（默认 off。开启会增加一次 nav 接口调用，但能提高 view/player/reply 接口在风控 IP 上的成功率）')
     parser.add_argument('--lang', choices=['zh', 'en'], default='zh', help='输出语言：zh=简体中文（默认）/ en=English（影响 Markdown 渲染与 IMA 上传文档）')
     parser.add_argument('--md', default='', help='额外输出一份 Markdown 文档到指定路径（内容受 --lang 影响）')
+    parser.add_argument('--concise', action='store_true', help='精简模式：Markdown 只输出内容主体（字幕/正文/转写/README）+ 末尾「重要声明」，省略概览表、评论、参考资料等其余章节（同时作用于 --md / --local-out / --ima-raw）')
     args = parser.parse_args()
 
     # 健康探测模式：不抽取内容，仅检查依赖与端点
@@ -2474,6 +2489,8 @@ def main():
     data['extracted_at'] = datetime.now(tz=CST).strftime('%Y-%m-%d %H:%M:%S')
     data['version'] = __version__
     data['lang'] = args.lang
+    data['concise'] = bool(args.concise)
+    data['markdown_mode'] = 'concise' if args.concise else 'full'
 
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
